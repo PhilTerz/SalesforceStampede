@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::AppError;
 
@@ -231,6 +231,118 @@ impl Database {
         .await
         .map_err(|e| AppError::Internal(format!("List orgs task failed: {e}")))?
     }
+
+    /// Gets a single organization by ID.
+    pub async fn get_org(&self, org_id: &str) -> Result<Option<Org>, AppError> {
+        let db_path = self.db_path.clone();
+        let org_id = org_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&db_path)
+                .map_err(|e| AppError::Internal(format!("Failed to open database: {e}")))?;
+
+            configure_connection(&conn)?;
+
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                    SELECT id, name, org_type, instance_url, login_url, username, api_version, created_at, updated_at
+                    FROM orgs
+                    WHERE id = ?1
+                    "#,
+                )
+                .map_err(|e| AppError::Internal(format!("Failed to prepare query: {e}")))?;
+
+            let org = stmt
+                .query_row([&org_id], |row| {
+                    Ok(Org {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        org_type: row.get(2)?,
+                        instance_url: row.get(3)?,
+                        login_url: row.get(4)?,
+                        username: row.get(5)?,
+                        api_version: row.get(6)?,
+                        created_at: row.get(7)?,
+                        updated_at: row.get(8)?,
+                    })
+                })
+                .optional()
+                .map_err(|e| AppError::Internal(format!("Failed to query org: {e}")))?;
+
+            Ok::<_, AppError>(org)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Get org task failed: {e}")))?
+    }
+
+    /// Inserts or updates an organization (upsert).
+    /// Updates `updated_at` on conflict, preserves `created_at`.
+    pub async fn upsert_org(&self, org: Org) -> Result<(), AppError> {
+        let db_path = self.db_path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&db_path)
+                .map_err(|e| AppError::Internal(format!("Failed to open database: {e}")))?;
+
+            configure_connection(&conn)?;
+
+            conn.execute(
+                r#"
+                INSERT INTO orgs (id, name, org_type, instance_url, login_url, username, api_version, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    org_type = excluded.org_type,
+                    instance_url = excluded.instance_url,
+                    login_url = excluded.login_url,
+                    username = excluded.username,
+                    api_version = excluded.api_version,
+                    updated_at = excluded.updated_at
+                "#,
+                rusqlite::params![
+                    org.id,
+                    org.name,
+                    org.org_type,
+                    org.instance_url,
+                    org.login_url,
+                    org.username,
+                    org.api_version,
+                    org.created_at,
+                    org.updated_at,
+                ],
+            )
+            .map_err(|e| AppError::Internal(format!("Failed to upsert org: {e}")))?;
+
+            Ok::<_, AppError>(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Upsert org task failed: {e}")))??;
+
+        Ok(())
+    }
+
+    /// Deletes an organization by ID.
+    pub async fn delete_org(&self, org_id: &str) -> Result<(), AppError> {
+        let db_path = self.db_path.clone();
+        let org_id = org_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&db_path)
+                .map_err(|e| AppError::Internal(format!("Failed to open database: {e}")))?;
+
+            configure_connection(&conn)?;
+
+            conn.execute("DELETE FROM orgs WHERE id = ?1", [&org_id])
+                .map_err(|e| AppError::Internal(format!("Failed to delete org: {e}")))?;
+
+            Ok::<_, AppError>(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Delete org task failed: {e}")))??;
+
+        Ok(())
+    }
 }
 
 /// Configures connection with busy timeout and WAL mode.
@@ -453,5 +565,152 @@ mod tests {
 
         assert!(db_path.exists(), "Database file should exist in nested path");
         db.health_check().await.expect("Health check should pass");
+    }
+
+    #[tokio::test]
+    async fn get_org_returns_none_for_missing() {
+        let (_temp_dir, db_path) = test_db_path();
+        let db = Database::init(db_path).await.expect("Failed to init database");
+
+        let result = db.get_org("nonexistent").await.expect("Should not error");
+        assert!(result.is_none(), "Should return None for missing org");
+    }
+
+    #[tokio::test]
+    async fn get_org_returns_existing() {
+        let (_temp_dir, db_path) = test_db_path();
+        let db = Database::init(db_path).await.expect("Failed to init database");
+
+        let now = current_timestamp();
+        let org = Org {
+            id: "00Dxx0000000001".to_string(),
+            name: "Test Org".to_string(),
+            org_type: "Production".to_string(),
+            instance_url: "https://test.salesforce.com".to_string(),
+            login_url: "https://login.salesforce.com".to_string(),
+            username: "test@test.com".to_string(),
+            api_version: "60.0".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        db.insert_org(org.clone()).await.expect("Failed to insert");
+
+        let result = db.get_org("00Dxx0000000001").await.expect("Should not error");
+        assert!(result.is_some(), "Should return the org");
+        let fetched = result.unwrap();
+        assert_eq!(fetched.id, org.id);
+        assert_eq!(fetched.name, org.name);
+    }
+
+    #[tokio::test]
+    async fn upsert_org_inserts_new() {
+        let (_temp_dir, db_path) = test_db_path();
+        let db = Database::init(db_path).await.expect("Failed to init database");
+
+        let now = current_timestamp();
+        let org = Org {
+            id: "00Dxx0000000001".to_string(),
+            name: "New Org".to_string(),
+            org_type: "Production".to_string(),
+            instance_url: "https://new.salesforce.com".to_string(),
+            login_url: "https://login.salesforce.com".to_string(),
+            username: "new@test.com".to_string(),
+            api_version: "60.0".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        db.upsert_org(org.clone()).await.expect("Failed to upsert");
+
+        let orgs = db.list_orgs().await.expect("Failed to list");
+        assert_eq!(orgs.len(), 1);
+        assert_eq!(orgs[0].name, "New Org");
+    }
+
+    #[tokio::test]
+    async fn upsert_org_updates_existing() {
+        let (_temp_dir, db_path) = test_db_path();
+        let db = Database::init(db_path).await.expect("Failed to init database");
+
+        let now = current_timestamp();
+        let org1 = Org {
+            id: "00Dxx0000000001".to_string(),
+            name: "Original Name".to_string(),
+            org_type: "Production".to_string(),
+            instance_url: "https://orig.salesforce.com".to_string(),
+            login_url: "https://login.salesforce.com".to_string(),
+            username: "orig@test.com".to_string(),
+            api_version: "59.0".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        db.upsert_org(org1).await.expect("First upsert should succeed");
+
+        // Update with same ID
+        let later = now + 1000;
+        let org2 = Org {
+            id: "00Dxx0000000001".to_string(),
+            name: "Updated Name".to_string(),
+            org_type: "Sandbox".to_string(),
+            instance_url: "https://updated.salesforce.com".to_string(),
+            login_url: "https://test.salesforce.com".to_string(),
+            username: "updated@test.com".to_string(),
+            api_version: "60.0".to_string(),
+            created_at: later,
+            updated_at: later,
+        };
+
+        db.upsert_org(org2).await.expect("Second upsert should succeed");
+
+        let orgs = db.list_orgs().await.expect("Failed to list");
+        assert_eq!(orgs.len(), 1, "Should still have one org");
+        assert_eq!(orgs[0].name, "Updated Name");
+        assert_eq!(orgs[0].org_type, "Sandbox");
+        assert_eq!(orgs[0].instance_url, "https://updated.salesforce.com");
+    }
+
+    #[tokio::test]
+    async fn delete_org_removes_existing() {
+        let (_temp_dir, db_path) = test_db_path();
+        let db = Database::init(db_path).await.expect("Failed to init database");
+
+        let now = current_timestamp();
+        let org = Org {
+            id: "00Dxx0000000001".to_string(),
+            name: "To Delete".to_string(),
+            org_type: "Production".to_string(),
+            instance_url: "https://delete.salesforce.com".to_string(),
+            login_url: "https://login.salesforce.com".to_string(),
+            username: "delete@test.com".to_string(),
+            api_version: "60.0".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        db.insert_org(org).await.expect("Failed to insert");
+
+        // Verify it exists
+        let before = db.list_orgs().await.expect("Failed to list");
+        assert_eq!(before.len(), 1);
+
+        // Delete
+        db.delete_org("00Dxx0000000001").await.expect("Failed to delete");
+
+        // Verify it's gone
+        let after = db.list_orgs().await.expect("Failed to list");
+        assert_eq!(after.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn delete_org_is_idempotent() {
+        let (_temp_dir, db_path) = test_db_path();
+        let db = Database::init(db_path).await.expect("Failed to init database");
+
+        // Delete non-existent org should not error
+        db.delete_org("nonexistent")
+            .await
+            .expect("Delete should succeed for missing org");
     }
 }

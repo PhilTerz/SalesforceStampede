@@ -1,27 +1,14 @@
+pub mod commands;
 pub mod error;
 pub mod salesforce;
+pub mod state;
 pub mod storage;
 
-use std::sync::{Arc, RwLock};
+use tauri::Manager;
 
-/// Application state shared across Tauri commands.
-/// This is a minimal shell—real fields will be added in later chunks.
-pub struct AppState {
-    // Placeholder: will hold auth session, HTTP client, etc.
-    _placeholder: (),
-}
-
-impl AppState {
-    pub fn new() -> Arc<RwLock<Self>> {
-        Arc::new(RwLock::new(Self { _placeholder: () }))
-    }
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self { _placeholder: () }
-    }
-}
+use crate::commands::{get_active_org, list_orgs, login, logout, switch_org};
+use crate::state::AppState;
+use crate::storage::Database;
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
@@ -34,7 +21,35 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .setup(|app| {
+            // Initialize database
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .expect("Failed to get app data dir");
+            let db_path = app_data_dir.join("stampede.db");
+
+            // Use tauri's async runtime to initialize the database
+            let db = tauri::async_runtime::block_on(async {
+                Database::init(db_path)
+                    .await
+                    .expect("Failed to initialize database")
+            });
+
+            // Create and manage app state
+            let state = AppState::new(db);
+            app.manage(state);
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            login,
+            list_orgs,
+            switch_org,
+            get_active_org,
+            logout,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

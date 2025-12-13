@@ -85,6 +85,10 @@ pub enum AppError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 
+    // ── Not Found ──────────────────────────────────────────────────────────────
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     // ── Generic fallback ──────────────────────────────────────────────────────
     #[error("Internal error: {0}")]
     Internal(String),
@@ -190,6 +194,13 @@ impl AppError {
                 action: Some("Check network and retry".into()),
             },
 
+            // ── Not Found ─────────────────────────────────────────────────────
+            AppError::NotFound(msg) => ErrorPresentation {
+                title: "Not Found".into(),
+                message: sanitize_message(msg, "The requested item was not found."),
+                action: None,
+            },
+
             // ── Generic ───────────────────────────────────────────────────────
             AppError::Internal(_) => ErrorPresentation {
                 title: "Unexpected Error".into(),
@@ -237,6 +248,8 @@ mod tests {
             AppError::CsvChunkError("chunk parse failed".into()),
             // Network
             AppError::ConnectionFailed("timeout".into()),
+            // Not Found
+            AppError::NotFound("org 12345".into()),
             // Generic
             AppError::Internal("something broke".into()),
         ]
