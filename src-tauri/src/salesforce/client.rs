@@ -4,12 +4,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
-use secrecy::SecretString;
+use reqwest::Method;
+use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{Mutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 use url::Url;
 
 use crate::error::AppError;
+use crate::salesforce::refresh::{self, CLIENT_ID};
+use crate::storage::credentials as keychain;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -180,8 +183,7 @@ pub struct SalesforceClient {
     http: reqwest::Client,
     /// Thread-safe credentials storage.
     creds: Arc<RwLock<OrgCredentials>>,
-    /// Lock to serialize refresh token operations (used in future OAuth chunk).
-    #[allow(dead_code)]
+    /// Lock to serialize refresh token operations.
     refresh_lock: Arc<Mutex<()>>,
     /// Controls URL sanitization for logging.
     logging_mode: LoggingMode,
@@ -246,11 +248,247 @@ impl SalesforceClient {
     /// # Security
     ///
     /// This method does NOT automatically inject the Authorization header.
-    /// For authenticated requests, use the appropriate higher-level methods
-    /// (to be added in future chunks).
+    /// For authenticated requests, use `request_authed` instead.
     pub async fn get_absolute(&self, url: Url) -> Result<reqwest::Response, AppError> {
         let request = self.http.get(url.as_str());
         self.execute_with_logging(request, url).await
+    }
+
+    /// Returns a reference to the underlying HTTP client.
+    #[allow(dead_code)]
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// Builds a full URL by joining the path with the instance URL.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The API path (e.g., "/services/data/v60.0/query")
+    ///
+    /// # Errors
+    ///
+    /// Returns `AppError::NotAuthenticated` if no instance URL is configured.
+    /// Returns `AppError::Internal` if the URL cannot be parsed.
+    pub async fn build_url(&self, path: &str) -> Result<Url, AppError> {
+        let creds = self.creds.read().await;
+
+        if creds.instance_url.is_empty() {
+            return Err(AppError::NotAuthenticated);
+        }
+
+        let base = Url::parse(&creds.instance_url).map_err(|_| {
+            AppError::Internal("Invalid instance URL".to_string())
+        })?;
+
+        base.join(path).map_err(|_| {
+            AppError::Internal(format!("Invalid path: {}", path))
+        })
+    }
+
+    /// Executes an authenticated request with automatic token refresh.
+    ///
+    /// This is the primary method for making authenticated Salesforce API calls.
+    /// It handles:
+    /// - Automatically attaching the Authorization header
+    /// - Detecting 401 responses and refreshing the token
+    /// - Retrying the request after refresh
+    /// - Thread-safe refresh with double-checked locking
+    ///
+    /// # Arguments
+    ///
+    /// * `method` - The HTTP method (GET, POST, etc.)
+    /// * `path` - The API path (e.g., "/services/data/v60.0/query")
+    /// * `body` - Optional request body (as bytes for clonability)
+    ///
+    /// # Errors
+    ///
+    /// - `AppError::NotAuthenticated` - No credentials or refresh token available
+    /// - `AppError::SessionExpired` - Token refresh failed, user must re-login
+    /// - `AppError::ConnectionFailed` - Network error
+    pub async fn request_authed(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<reqwest::Response, AppError> {
+        // Attempt 1: Try with current credentials
+        let (url, original_token) = {
+            let creds = self.creds.read().await;
+            if creds.instance_url.is_empty() {
+                return Err(AppError::NotAuthenticated);
+            }
+
+            let base = Url::parse(&creds.instance_url).map_err(|_| {
+                AppError::Internal("Invalid instance URL".to_string())
+            })?;
+
+            let url = base.join(path).map_err(|_| {
+                AppError::Internal(format!("Invalid path: {}", path))
+            })?;
+
+            let token = creds.access_token.expose_secret().to_string();
+            (url, token)
+        };
+
+        let response = self
+            .execute_authed_request(method.clone(), url.clone(), body.clone(), &original_token)
+            .await?;
+
+        // Check if we need to refresh
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+
+        info!("[SFDC] Received 401, attempting token refresh...");
+
+        // Refresh logic with double-checked locking
+        {
+            let _refresh_guard = self.refresh_lock.lock().await;
+
+            // Double-check: another thread may have already refreshed
+            let current_token = {
+                let creds = self.creds.read().await;
+                creds.access_token.expose_secret().to_string()
+            };
+
+            if current_token != original_token {
+                // Token was refreshed by another thread, skip refresh
+                info!("[SFDC] Token already refreshed by another thread");
+            } else {
+                // We need to refresh
+                self.do_token_refresh().await?;
+            }
+        }
+
+        // Attempt 2: Retry with new credentials
+        let (new_url, new_token) = {
+            let creds = self.creds.read().await;
+
+            // Instance URL might have changed after refresh
+            let base = Url::parse(&creds.instance_url).map_err(|_| {
+                AppError::Internal("Invalid instance URL".to_string())
+            })?;
+
+            let url = base.join(path).map_err(|_| {
+                AppError::Internal(format!("Invalid path: {}", path))
+            })?;
+
+            let token = creds.access_token.expose_secret().to_string();
+            (url, token)
+        };
+
+        let retry_response = self
+            .execute_authed_request(method, new_url, body, &new_token)
+            .await?;
+
+        // If still 401 after refresh, session is truly expired
+        if retry_response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            warn!("[SFDC] Still unauthorized after token refresh");
+            return Err(AppError::SessionExpired);
+        }
+
+        Ok(retry_response)
+    }
+
+    /// Executes a single authenticated request (no retry logic).
+    async fn execute_authed_request(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<Vec<u8>>,
+        access_token: &str,
+    ) -> Result<reqwest::Response, AppError> {
+        let start = Instant::now();
+        let sanitized_url = sanitize_url_for_logs(&url, self.logging_mode);
+
+        let mut request = self.http.request(method.clone(), url.as_str());
+        request = request.bearer_auth(access_token);
+
+        if let Some(body_bytes) = body {
+            request = request
+                .header("Content-Type", "application/json")
+                .body(body_bytes);
+        }
+
+        let result = request.send().await;
+        let duration_ms = start.elapsed().as_millis();
+
+        match result {
+            Ok(response) => {
+                let status = response.status();
+                let x_request_id = response
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-");
+
+                info!(
+                    "[SFDC] {} {} {} {}ms {}",
+                    method,
+                    sanitized_url,
+                    status.as_u16(),
+                    duration_ms,
+                    x_request_id
+                );
+
+                Ok(response)
+            }
+            Err(_) => {
+                info!(
+                    "[SFDC] {} {} FAILED {}ms",
+                    method, sanitized_url, duration_ms
+                );
+                Err(AppError::ConnectionFailed(
+                    "Connection to Salesforce failed".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Performs the actual token refresh operation.
+    async fn do_token_refresh(&self) -> Result<(), AppError> {
+        let (org_id, instance_url) = {
+            let creds = self.creds.read().await;
+            (creds.org_id.clone(), creds.instance_url.clone())
+        };
+
+        // Get refresh token from keychain
+        let tokens = keychain::get_tokens(&org_id).await.map_err(|e| {
+            warn!("[SFDC] Failed to get refresh token from keychain: {:?}", e);
+            AppError::NotAuthenticated
+        })?;
+
+        let refresh_token_str = tokens.refresh_token.clone();
+        let refresh_token = SecretString::from(tokens.refresh_token);
+        let login_url = refresh::get_login_url_for_refresh(&instance_url);
+
+        // Perform the refresh
+        let token_response = refresh::refresh_access_token(
+            &self.http,
+            &login_url,
+            &refresh_token,
+            CLIENT_ID,
+        )
+        .await?;
+
+        // Update credentials
+        {
+            let mut creds = self.creds.write().await;
+            creds.access_token = SecretString::from(token_response.access_token.clone());
+            creds.instance_url = token_response.instance_url.clone();
+        }
+
+        // Update keychain with new access token
+        keychain::store_tokens(
+            &org_id,
+            &token_response.access_token,
+            &refresh_token_str,
+        )
+        .await?;
+
+        info!("[SFDC] Token refresh complete, credentials updated");
+        Ok(())
     }
 
     /// Executes a request with timing, logging, and error handling.
@@ -682,5 +920,59 @@ mod tests {
     fn logging_mode_default_is_path_only() {
         let mode = LoggingMode::default();
         assert_eq!(mode, LoggingMode::PathOnly);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // build_url Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn build_url_returns_not_authenticated_when_no_instance_url() {
+        let client = SalesforceClient::new_placeholder().unwrap();
+
+        let result = client.build_url("/services/data/v60.0/query").await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(AppError::NotAuthenticated)));
+    }
+
+    #[tokio::test]
+    async fn build_url_constructs_correct_url() {
+        let creds = OrgCredentials {
+            org_id: "00Dxx0000001234".to_string(),
+            user_id: "005xx0000001234".to_string(),
+            username: "test@example.com".to_string(),
+            instance_url: "https://na1.salesforce.com".to_string(),
+            access_token: SecretString::from("token".to_string()),
+            refresh_token: Some(SecretString::from("refresh".to_string())),
+            api_version: "v60.0".to_string(),
+        };
+        let client = SalesforceClient::new(creds).unwrap();
+
+        let result = client.build_url("/services/data/v60.0/query").await;
+
+        assert!(result.is_ok());
+        let url = result.unwrap();
+        assert_eq!(url.as_str(), "https://na1.salesforce.com/services/data/v60.0/query");
+    }
+
+    #[tokio::test]
+    async fn build_url_handles_path_with_query() {
+        let creds = OrgCredentials {
+            org_id: "00Dxx0000001234".to_string(),
+            user_id: "005xx0000001234".to_string(),
+            username: "test@example.com".to_string(),
+            instance_url: "https://na1.salesforce.com".to_string(),
+            access_token: SecretString::from("token".to_string()),
+            refresh_token: None,
+            api_version: "v60.0".to_string(),
+        };
+        let client = SalesforceClient::new(creds).unwrap();
+
+        let result = client.build_url("/services/data/v60.0/query?q=SELECT+Id").await;
+
+        assert!(result.is_ok());
+        let url = result.unwrap();
+        assert!(url.as_str().contains("query?q="));
     }
 }
