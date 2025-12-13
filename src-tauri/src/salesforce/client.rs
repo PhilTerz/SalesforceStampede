@@ -56,16 +56,22 @@ pub enum LoggingMode {
 
 /// Salesforce organization credentials for API access.
 ///
-/// The `access_token` is wrapped in `SecretString` to prevent accidental
-/// exposure through `Debug` traits or logging.
+/// Sensitive fields (`access_token`, `refresh_token`) are wrapped in `SecretString`
+/// to prevent accidental exposure through `Debug` traits or logging.
 #[derive(Clone)]
 pub struct OrgCredentials {
     /// Salesforce organization ID (e.g., "00D...")
     pub org_id: String,
+    /// Salesforce user ID (e.g., "005...")
+    pub user_id: String,
+    /// Salesforce username (e.g., "user@example.com")
+    pub username: String,
     /// Instance URL (e.g., "https://na1.salesforce.com")
     pub instance_url: String,
     /// OAuth access token (wrapped for security)
     pub access_token: SecretString,
+    /// OAuth refresh token (wrapped for security, optional for some flows)
+    pub refresh_token: Option<SecretString>,
     /// Salesforce API version (e.g., "v60.0")
     pub api_version: String,
 }
@@ -74,8 +80,11 @@ impl std::fmt::Debug for OrgCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrgCredentials")
             .field("org_id", &self.org_id)
+            .field("user_id", &self.user_id)
+            .field("username", &self.username)
             .field("instance_url", &self.instance_url)
             .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
             .field("api_version", &self.api_version)
             .finish()
     }
@@ -83,11 +92,14 @@ impl std::fmt::Debug for OrgCredentials {
 
 impl OrgCredentials {
     /// Creates placeholder credentials for app startup before authentication.
-    fn placeholder() -> Self {
+    pub(crate) fn placeholder() -> Self {
         Self {
             org_id: String::new(),
+            user_id: String::new(),
+            username: String::new(),
             instance_url: String::new(),
             access_token: SecretString::from(String::new()),
+            refresh_token: None,
             api_version: "v60.0".to_string(),
         }
     }
@@ -501,8 +513,11 @@ mod tests {
     fn org_credentials_debug_redacts_token() {
         let creds = OrgCredentials {
             org_id: "00Dxx0000001234".to_string(),
+            user_id: "005xx0000001234".to_string(),
+            username: "test@example.com".to_string(),
             instance_url: "https://na1.salesforce.com".to_string(),
             access_token: SecretString::from("super_secret_token_12345".to_string()),
+            refresh_token: Some(SecretString::from("super_secret_refresh_67890".to_string())),
             api_version: "v60.0".to_string(),
         };
 
@@ -510,11 +525,14 @@ mod tests {
 
         // Should contain non-sensitive fields
         assert!(debug_output.contains("00Dxx0000001234"));
+        assert!(debug_output.contains("005xx0000001234"));
+        assert!(debug_output.contains("test@example.com"));
         assert!(debug_output.contains("na1.salesforce.com"));
         assert!(debug_output.contains("v60.0"));
 
-        // Should NOT contain the actual token
+        // Should NOT contain the actual tokens
         assert!(!debug_output.contains("super_secret_token_12345"));
+        assert!(!debug_output.contains("super_secret_refresh_67890"));
         assert!(debug_output.contains("[REDACTED]"));
     }
 
@@ -523,7 +541,10 @@ mod tests {
         let creds = OrgCredentials::placeholder();
 
         assert!(creds.org_id.is_empty());
+        assert!(creds.user_id.is_empty());
+        assert!(creds.username.is_empty());
         assert!(creds.instance_url.is_empty());
+        assert!(creds.refresh_token.is_none());
         assert_eq!(creds.api_version, "v60.0");
     }
 
@@ -535,8 +556,11 @@ mod tests {
     fn client_new_succeeds_with_valid_creds() {
         let creds = OrgCredentials {
             org_id: "00Dxx0000001234".to_string(),
+            user_id: "005xx0000001234".to_string(),
+            username: "test@example.com".to_string(),
             instance_url: "https://na1.salesforce.com".to_string(),
             access_token: SecretString::from("token".to_string()),
+            refresh_token: Some(SecretString::from("refresh".to_string())),
             api_version: "v60.0".to_string(),
         };
 
@@ -574,8 +598,11 @@ mod tests {
         // Update credentials
         let new_creds = OrgCredentials {
             org_id: "00Dxx9999999999".to_string(),
+            user_id: "005xx9999999999".to_string(),
+            username: "newuser@example.com".to_string(),
             instance_url: "https://na99.salesforce.com".to_string(),
             access_token: SecretString::from("new_token".to_string()),
+            refresh_token: Some(SecretString::from("new_refresh".to_string())),
             api_version: "v61.0".to_string(),
         };
         client.update_credentials(new_creds).await;
@@ -584,6 +611,8 @@ mod tests {
         {
             let creds = client.creds.read().await;
             assert_eq!(creds.org_id, "00Dxx9999999999");
+            assert_eq!(creds.user_id, "005xx9999999999");
+            assert_eq!(creds.username, "newuser@example.com");
             assert_eq!(creds.instance_url, "https://na99.salesforce.com");
             assert_eq!(creds.api_version, "v61.0");
         }
