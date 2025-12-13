@@ -1,6 +1,7 @@
 //! SQLite database module with schema migrations.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS job_groups (
     id TEXT PRIMARY KEY NOT NULL,
     org_id TEXT NOT NULL,
     operation TEXT NOT NULL,
-    object TEXT NOT NULL,
+    sobject_name TEXT NOT NULL,
     batch_size INTEGER NOT NULL,
     total_parts INTEGER NOT NULL,
     records_processed INTEGER NOT NULL DEFAULT 0,
@@ -110,29 +111,23 @@ impl Database {
             // Create parent directory if needed
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    AppError::Internal(format!("Failed to create database directory: {}", e))
+                    AppError::Internal(format!("Failed to create database directory: {e}"))
                 })?;
             }
 
-            // Open connection and run migrations
-            let conn = Connection::open(&path).map_err(|e| {
-                AppError::Internal(format!("Failed to open database: {}", e))
-            })?;
+            // Open connection and configure
+            let mut conn = Connection::open(&path)
+                .map_err(|e| AppError::Internal(format!("Failed to open database: {e}")))?;
 
-            run_migrations(&conn)?;
+            configure_connection(&conn)?;
+            run_migrations(&mut conn)?;
 
             Ok::<_, AppError>(())
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Database init task failed: {}", e)))??;
+        .map_err(|e| AppError::Internal(format!("Database init task failed: {e}")))??;
 
         Ok(Self { db_path })
-    }
-
-    /// Returns a new connection to the database.
-    fn connect(&self) -> Result<Connection, AppError> {
-        Connection::open(&self.db_path)
-            .map_err(|e| AppError::Internal(format!("Failed to open database: {}", e)))
     }
 
     /// Simple health check: executes SELECT 1.
@@ -141,24 +136,31 @@ impl Database {
 
         tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&db_path)
-                .map_err(|e| AppError::Internal(format!("Failed to open database: {}", e)))?;
+                .map_err(|e| AppError::Internal(format!("Failed to open database: {e}")))?;
 
-            conn.execute_batch("SELECT 1")
-                .map_err(|e| AppError::Internal(format!("Health check failed: {}", e)))?;
+            configure_connection(&conn)?;
+
+            conn.query_row("SELECT 1", [], |_| Ok(()))
+                .map_err(|e| AppError::Internal(format!("Health check failed: {e}")))?;
 
             Ok::<_, AppError>(())
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Health check task failed: {}", e)))??;
+        .map_err(|e| AppError::Internal(format!("Health check task failed: {e}")))??;
 
         Ok(())
     }
 
     /// Inserts a new organization.
     pub async fn insert_org(&self, org: Org) -> Result<(), AppError> {
-        let conn = self.connect()?;
+        let db_path = self.db_path.clone();
 
         tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&db_path)
+                .map_err(|e| AppError::Internal(format!("Failed to open database: {e}")))?;
+
+            configure_connection(&conn)?;
+
             conn.execute(
                 r#"
                 INSERT INTO orgs (id, name, org_type, instance_url, login_url, username, api_version, created_at, updated_at)
@@ -176,21 +178,26 @@ impl Database {
                     org.updated_at,
                 ],
             )
-            .map_err(|e| AppError::Internal(format!("Failed to insert org: {}", e)))?;
+            .map_err(|e| AppError::Internal(format!("Failed to insert org: {e}")))?;
 
             Ok::<_, AppError>(())
         })
         .await
-        .map_err(|e| AppError::Internal(format!("Insert org task failed: {}", e)))??;
+        .map_err(|e| AppError::Internal(format!("Insert org task failed: {e}")))??;
 
         Ok(())
     }
 
     /// Lists all organizations.
     pub async fn list_orgs(&self) -> Result<Vec<Org>, AppError> {
-        let conn = self.connect()?;
+        let db_path = self.db_path.clone();
 
         tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&db_path)
+                .map_err(|e| AppError::Internal(format!("Failed to open database: {e}")))?;
+
+            configure_connection(&conn)?;
+
             let mut stmt = conn
                 .prepare(
                     r#"
@@ -199,7 +206,7 @@ impl Database {
                     ORDER BY name ASC
                     "#,
                 )
-                .map_err(|e| AppError::Internal(format!("Failed to prepare query: {}", e)))?;
+                .map_err(|e| AppError::Internal(format!("Failed to prepare query: {e}")))?;
 
             let orgs = stmt
                 .query_map([], |row| {
@@ -215,22 +222,33 @@ impl Database {
                         updated_at: row.get(8)?,
                     })
                 })
-                .map_err(|e| AppError::Internal(format!("Failed to query orgs: {}", e)))?
+                .map_err(|e| AppError::Internal(format!("Failed to query orgs: {e}")))?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| AppError::Internal(format!("Failed to collect orgs: {}", e)))?;
+                .map_err(|e| AppError::Internal(format!("Failed to collect orgs: {e}")))?;
 
             Ok::<_, AppError>(orgs)
         })
         .await
-        .map_err(|e| AppError::Internal(format!("List orgs task failed: {}", e)))?
+        .map_err(|e| AppError::Internal(format!("List orgs task failed: {e}")))?
     }
 }
 
+/// Configures connection with busy timeout and WAL mode.
+fn configure_connection(conn: &Connection) -> Result<(), AppError> {
+    conn.busy_timeout(Duration::from_secs(10))
+        .map_err(|e| AppError::Internal(format!("Failed to set busy timeout: {e}")))?;
+
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| AppError::Internal(format!("Failed to set WAL mode: {e}")))?;
+
+    Ok(())
+}
+
 /// Runs database migrations using PRAGMA user_version.
-fn run_migrations(conn: &Connection) -> Result<(), AppError> {
+fn run_migrations(conn: &mut Connection) -> Result<(), AppError> {
     let current_version: i32 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|e| AppError::Internal(format!("Failed to get schema version: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to get schema version: {e}")))?;
 
     if current_version >= SCHEMA_VERSION {
         return Ok(());
@@ -238,21 +256,21 @@ fn run_migrations(conn: &Connection) -> Result<(), AppError> {
 
     // Run migrations in a transaction
     let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| AppError::Internal(format!("Failed to start migration transaction: {}", e)))?;
+        .transaction()
+        .map_err(|e| AppError::Internal(format!("Failed to start migration transaction: {e}")))?;
 
     // V1 migration
     if current_version < 1 {
         tx.execute_batch(V1_SCHEMA)
-            .map_err(|e| AppError::Internal(format!("V1 migration failed: {}", e)))?;
+            .map_err(|e| AppError::Internal(format!("V1 migration failed: {e}")))?;
     }
 
     // Update version
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)
-        .map_err(|e| AppError::Internal(format!("Failed to update schema version: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to update schema version: {e}")))?;
 
     tx.commit()
-        .map_err(|e| AppError::Internal(format!("Failed to commit migration: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Failed to commit migration: {e}")))?;
 
     Ok(())
 }
@@ -318,6 +336,13 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("Failed to get version");
         assert_eq!(version, SCHEMA_VERSION, "Schema version should match");
+
+        // Verify WAL mode is set (need to configure connection first since it's per-connection)
+        configure_connection(&conn).expect("Failed to configure connection");
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("Failed to get journal mode");
+        assert_eq!(journal_mode.to_lowercase(), "wal", "Should be in WAL mode");
 
         // Health check should work
         db.health_check().await.expect("Health check should pass");
