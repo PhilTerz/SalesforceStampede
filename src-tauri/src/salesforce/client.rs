@@ -1,0 +1,657 @@
+//! Salesforce HTTP client with secure credential handling and safe logging.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use secrecy::SecretString;
+use tokio::sync::{Mutex, RwLock};
+use tracing::info;
+use url::Url;
+
+use crate::error::AppError;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// User agent string for all Salesforce API requests.
+const CLIENT_USER_AGENT: &str = "SalesforceStampede/1.0.0";
+
+/// Default request timeout in seconds.
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+/// Query parameter keys (case-insensitive) that should have their values redacted.
+const SENSITIVE_QUERY_PARAMS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "code",
+    "token",
+    "sid",
+    "session",
+    "authorization",
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LoggingMode
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Controls how URLs are sanitized for logging.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LoggingMode {
+    /// Log only the path component. Strips scheme, host, query, and fragment.
+    /// Example: `/services/data/v60.0/query`
+    #[default]
+    PathOnly,
+
+    /// Log path and query parameters, but redact sensitive values.
+    /// Example: `/services/data/v60.0/sobjects?access_token=***&q=SELECT+Id`
+    PathAndQueryRedacted,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OrgCredentials
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Salesforce organization credentials for API access.
+///
+/// The `access_token` is wrapped in `SecretString` to prevent accidental
+/// exposure through `Debug` traits or logging.
+#[derive(Clone)]
+pub struct OrgCredentials {
+    /// Salesforce organization ID (e.g., "00D...")
+    pub org_id: String,
+    /// Instance URL (e.g., "https://na1.salesforce.com")
+    pub instance_url: String,
+    /// OAuth access token (wrapped for security)
+    pub access_token: SecretString,
+    /// Salesforce API version (e.g., "v60.0")
+    pub api_version: String,
+}
+
+impl std::fmt::Debug for OrgCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrgCredentials")
+            .field("org_id", &self.org_id)
+            .field("instance_url", &self.instance_url)
+            .field("access_token", &"[REDACTED]")
+            .field("api_version", &self.api_version)
+            .finish()
+    }
+}
+
+impl OrgCredentials {
+    /// Creates placeholder credentials for app startup before authentication.
+    fn placeholder() -> Self {
+        Self {
+            org_id: String::new(),
+            instance_url: String::new(),
+            access_token: SecretString::from(String::new()),
+            api_version: "v60.0".to_string(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// URL Sanitization
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Determines if a query parameter key is sensitive and should be redacted.
+fn is_sensitive_param(key: &str) -> bool {
+    let key_lower = key.to_ascii_lowercase();
+    SENSITIVE_QUERY_PARAMS
+        .iter()
+        .any(|&sensitive| key_lower == sensitive)
+}
+
+/// Sanitizes a URL for safe logging based on the specified mode.
+///
+/// # Security
+///
+/// This function uses the `url` crate for proper URL parsing rather than
+/// regex-based string manipulation, ensuring robust handling of edge cases.
+///
+/// # Arguments
+///
+/// * `url` - The URL to sanitize
+/// * `mode` - The logging mode determining what parts to include
+///
+/// # Returns
+///
+/// A string safe for logging that never contains the scheme, host, or fragment.
+pub fn sanitize_url_for_logs(url: &Url, mode: LoggingMode) -> String {
+    // Always start with the path
+    let path = url.path();
+
+    match mode {
+        LoggingMode::PathOnly => path.to_string(),
+        LoggingMode::PathAndQueryRedacted => {
+            // Check if there are any query parameters
+            let query_pairs: Vec<_> = url.query_pairs().collect();
+            if query_pairs.is_empty() {
+                return path.to_string();
+            }
+
+            // Build redacted query string
+            let redacted_pairs: Vec<String> = query_pairs
+                .into_iter()
+                .map(|(key, value)| {
+                    if is_sensitive_param(&key) {
+                        format!("{}=***", key)
+                    } else {
+                        format!("{}={}", key, value)
+                    }
+                })
+                .collect();
+
+            format!("{}?{}", path, redacted_pairs.join("&"))
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SalesforceClient
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Thread-safe HTTP client for Salesforce API interactions.
+///
+/// # Thread Safety
+///
+/// - `creds`: Protected by `RwLock` allowing concurrent reads (requests)
+///   but exclusive writes (credential refresh).
+/// - `refresh_lock`: `Mutex` to serialize refresh attempts and prevent
+///   thundering herd during token expiration.
+#[derive(Clone)]
+pub struct SalesforceClient {
+    /// The underlying HTTP client.
+    http: reqwest::Client,
+    /// Thread-safe credentials storage.
+    creds: Arc<RwLock<OrgCredentials>>,
+    /// Lock to serialize refresh token operations (used in future OAuth chunk).
+    #[allow(dead_code)]
+    refresh_lock: Arc<Mutex<()>>,
+    /// Controls URL sanitization for logging.
+    logging_mode: LoggingMode,
+}
+
+impl SalesforceClient {
+    /// Creates a new Salesforce client with the provided credentials.
+    ///
+    /// # Arguments
+    ///
+    /// * `creds` - Valid organization credentials
+    ///
+    /// # Errors
+    ///
+    /// Returns `AppError::Internal` if the HTTP client fails to initialize.
+    pub fn new(creds: OrgCredentials) -> Result<Self, AppError> {
+        let http = build_http_client()?;
+        Ok(Self {
+            http,
+            creds: Arc::new(RwLock::new(creds)),
+            refresh_lock: Arc::new(Mutex::new(())),
+            logging_mode: LoggingMode::default(),
+        })
+    }
+
+    /// Creates a client with placeholder credentials for app startup.
+    ///
+    /// Use this when the app initializes before the user has logged in.
+    /// The credentials should be updated via `update_credentials` after
+    /// successful OAuth authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AppError::Internal` if the HTTP client fails to initialize.
+    pub fn new_placeholder() -> Result<Self, AppError> {
+        Self::new(OrgCredentials::placeholder())
+    }
+
+    /// Updates the logging mode for URL sanitization.
+    pub fn with_logging_mode(mut self, mode: LoggingMode) -> Self {
+        self.logging_mode = mode;
+        self
+    }
+
+    /// Updates the stored credentials (e.g., after OAuth or token refresh).
+    pub async fn update_credentials(&self, creds: OrgCredentials) {
+        let mut guard = self.creds.write().await;
+        *guard = creds;
+    }
+
+    /// Executes a GET request to an absolute URL with logging.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The absolute URL to request
+    ///
+    /// # Errors
+    ///
+    /// Returns `AppError::ConnectionFailed` for network errors or
+    /// `AppError::Internal` for other failures.
+    ///
+    /// # Security
+    ///
+    /// This method does NOT automatically inject the Authorization header.
+    /// For authenticated requests, use the appropriate higher-level methods
+    /// (to be added in future chunks).
+    pub async fn get_absolute(&self, url: Url) -> Result<reqwest::Response, AppError> {
+        let request = self.http.get(url.as_str());
+        self.execute_with_logging(request, url).await
+    }
+
+    /// Executes a request with timing, logging, and error handling.
+    ///
+    /// # Security
+    ///
+    /// - Never logs the Authorization header
+    /// - Never logs request/response bodies
+    /// - Sanitizes URLs before logging
+    /// - Error messages never contain raw URLs or tokens
+    async fn execute_with_logging(
+        &self,
+        request: reqwest::RequestBuilder,
+        url: Url,
+    ) -> Result<reqwest::Response, AppError> {
+        let start = Instant::now();
+        let sanitized_url = sanitize_url_for_logs(&url, self.logging_mode);
+
+        // Execute the request
+        let result = request.send().await;
+        let duration_ms = start.elapsed().as_millis();
+
+        match result {
+            Ok(response) => {
+                let status = response.status();
+                let x_request_id = response
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-");
+
+                // Log successful request (method is always GET for now)
+                info!(
+                    "[SFDC] GET {} {} {}ms {}",
+                    sanitized_url,
+                    status.as_u16(),
+                    duration_ms,
+                    x_request_id
+                );
+
+                Ok(response)
+            }
+            Err(_) => {
+                // Log failed request without exposing the actual error
+                // (which may contain the full URL with tokens)
+                info!(
+                    "[SFDC] GET {} FAILED {}ms",
+                    sanitized_url, duration_ms
+                );
+
+                // Return a sanitized error message - never expose the raw reqwest error
+                Err(AppError::ConnectionFailed(
+                    "Connection to Salesforce failed".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// Builds the configured HTTP client.
+fn build_http_client() -> Result<reqwest::Client, AppError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(CLIENT_USER_AGENT),
+    );
+
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {}", e)))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // URL Sanitization Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_strips_scheme_and_host() {
+        let url = Url::parse("https://na1.salesforce.com/services/data/v60.0/query").unwrap();
+
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathOnly);
+
+        assert_eq!(result, "/services/data/v60.0/query");
+        assert!(!result.contains("https"));
+        assert!(!result.contains("na1.salesforce.com"));
+    }
+
+    #[test]
+    fn sanitize_strips_fragment() {
+        let url =
+            Url::parse("https://example.com/path?safe=value#secret-anchor").unwrap();
+
+        // PathOnly mode
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathOnly);
+        assert!(!result.contains("#"));
+        assert!(!result.contains("secret-anchor"));
+        assert_eq!(result, "/path");
+
+        // PathAndQueryRedacted mode
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathAndQueryRedacted);
+        assert!(!result.contains("#"));
+        assert!(!result.contains("secret-anchor"));
+        assert!(result.contains("safe=value"));
+    }
+
+    #[test]
+    fn path_only_excludes_query_string() {
+        let url = Url::parse(
+            "https://login.salesforce.com/services/oauth2/token?code=secret&state=abc",
+        )
+        .unwrap();
+
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathOnly);
+
+        assert_eq!(result, "/services/oauth2/token");
+        assert!(!result.contains("?"));
+        assert!(!result.contains("code"));
+        assert!(!result.contains("secret"));
+        assert!(!result.contains("state"));
+    }
+
+    #[test]
+    fn path_and_query_redacted_preserves_safe_keys() {
+        let url = Url::parse(
+            "https://na1.salesforce.com/services/data/v60.0/query?q=SELECT+Id+FROM+Account",
+        )
+        .unwrap();
+
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathAndQueryRedacted);
+
+        // URL crate decodes '+' as space, so we check for the decoded version
+        assert!(result.contains("q=SELECT Id FROM Account"));
+        assert!(result.starts_with("/services/data/v60.0/query"));
+    }
+
+    #[test]
+    fn path_and_query_redacted_redacts_sensitive_keys() {
+        // Test all sensitive parameters from the deny list
+        let test_cases = [
+            ("access_token", "abc123"),
+            ("Access_Token", "xyz789"), // Case variation
+            ("ACCESS_TOKEN", "TOKEN123"), // Uppercase
+            ("refresh_token", "refresh123"),
+            ("client_secret", "secret456"),
+            ("code", "authcode789"),
+            ("token", "sometoken"),
+            ("sid", "sessionid123"),
+            ("session", "sess456"),
+            ("authorization", "bearer123"),
+        ];
+
+        for (key, value) in test_cases {
+            let url_str = format!("https://example.com/path?{}={}", key, value);
+            let url = Url::parse(&url_str).unwrap();
+
+            let result = sanitize_url_for_logs(&url, LoggingMode::PathAndQueryRedacted);
+
+            // Should contain the key but not the value
+            assert!(
+                result.contains(&format!("{}=***", key)),
+                "Expected '{}=***' in result '{}' for key '{}'",
+                key,
+                result,
+                key
+            );
+            assert!(
+                !result.contains(value),
+                "Value '{}' should be redacted for key '{}' in result '{}'",
+                value,
+                key,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn path_and_query_redacted_handles_mixed_params() {
+        let url = Url::parse(
+            "https://login.salesforce.com/oauth?access_token=secret123&q=hello&SID=sess456&format=json",
+        )
+        .unwrap();
+
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathAndQueryRedacted);
+
+        // Safe params preserved
+        assert!(result.contains("q=hello"));
+        assert!(result.contains("format=json"));
+
+        // Sensitive params redacted
+        assert!(result.contains("access_token=***"));
+        assert!(result.contains("SID=***"));
+        assert!(!result.contains("secret123"));
+        assert!(!result.contains("sess456"));
+    }
+
+    #[test]
+    fn sanitize_handles_empty_query_string() {
+        let url = Url::parse("https://example.com/path").unwrap();
+
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathAndQueryRedacted);
+
+        assert_eq!(result, "/path");
+        assert!(!result.contains("?"));
+    }
+
+    #[test]
+    fn sanitize_handles_path_only_url() {
+        let url = Url::parse("https://example.com/").unwrap();
+
+        assert_eq!(sanitize_url_for_logs(&url, LoggingMode::PathOnly), "/");
+        assert_eq!(
+            sanitize_url_for_logs(&url, LoggingMode::PathAndQueryRedacted),
+            "/"
+        );
+    }
+
+    #[test]
+    fn sanitize_handles_deep_paths() {
+        let url = Url::parse(
+            "https://na1.salesforce.com/services/data/v60.0/sobjects/Account/describe",
+        )
+        .unwrap();
+
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathOnly);
+
+        assert_eq!(result, "/services/data/v60.0/sobjects/Account/describe");
+    }
+
+    #[test]
+    fn sanitize_handles_url_encoded_values() {
+        let url = Url::parse(
+            "https://example.com/query?q=SELECT%20Id%20FROM%20Account&access_token=abc%3D%3D",
+        )
+        .unwrap();
+
+        let result = sanitize_url_for_logs(&url, LoggingMode::PathAndQueryRedacted);
+
+        // The query value should be preserved (URL decoding handled by url crate)
+        assert!(result.contains("SELECT"));
+        // Token should still be redacted
+        assert!(result.contains("access_token=***"));
+        assert!(!result.contains("abc"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OrgCredentials Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn org_credentials_debug_redacts_token() {
+        let creds = OrgCredentials {
+            org_id: "00Dxx0000001234".to_string(),
+            instance_url: "https://na1.salesforce.com".to_string(),
+            access_token: SecretString::from("super_secret_token_12345".to_string()),
+            api_version: "v60.0".to_string(),
+        };
+
+        let debug_output = format!("{:?}", creds);
+
+        // Should contain non-sensitive fields
+        assert!(debug_output.contains("00Dxx0000001234"));
+        assert!(debug_output.contains("na1.salesforce.com"));
+        assert!(debug_output.contains("v60.0"));
+
+        // Should NOT contain the actual token
+        assert!(!debug_output.contains("super_secret_token_12345"));
+        assert!(debug_output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn org_credentials_placeholder_has_empty_values() {
+        let creds = OrgCredentials::placeholder();
+
+        assert!(creds.org_id.is_empty());
+        assert!(creds.instance_url.is_empty());
+        assert_eq!(creds.api_version, "v60.0");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SalesforceClient Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn client_new_succeeds_with_valid_creds() {
+        let creds = OrgCredentials {
+            org_id: "00Dxx0000001234".to_string(),
+            instance_url: "https://na1.salesforce.com".to_string(),
+            access_token: SecretString::from("token".to_string()),
+            api_version: "v60.0".to_string(),
+        };
+
+        let result = SalesforceClient::new(creds);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn client_new_placeholder_succeeds() {
+        let result = SalesforceClient::new_placeholder();
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn client_with_logging_mode_changes_mode() {
+        let client = SalesforceClient::new_placeholder().unwrap();
+        assert_eq!(client.logging_mode, LoggingMode::PathOnly);
+
+        let client = client.with_logging_mode(LoggingMode::PathAndQueryRedacted);
+        assert_eq!(client.logging_mode, LoggingMode::PathAndQueryRedacted);
+    }
+
+    #[tokio::test]
+    async fn client_update_credentials_works() {
+        let client = SalesforceClient::new_placeholder().unwrap();
+
+        // Initial state: empty credentials
+        {
+            let creds = client.creds.read().await;
+            assert!(creds.org_id.is_empty());
+        }
+
+        // Update credentials
+        let new_creds = OrgCredentials {
+            org_id: "00Dxx9999999999".to_string(),
+            instance_url: "https://na99.salesforce.com".to_string(),
+            access_token: SecretString::from("new_token".to_string()),
+            api_version: "v61.0".to_string(),
+        };
+        client.update_credentials(new_creds).await;
+
+        // Verify update
+        {
+            let creds = client.creds.read().await;
+            assert_eq!(creds.org_id, "00Dxx9999999999");
+            assert_eq!(creds.instance_url, "https://na99.salesforce.com");
+            assert_eq!(creds.api_version, "v61.0");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // is_sensitive_param Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_sensitive_param_detects_all_deny_list_items() {
+        for param in SENSITIVE_QUERY_PARAMS {
+            assert!(
+                is_sensitive_param(param),
+                "'{}' should be detected as sensitive",
+                param
+            );
+        }
+    }
+
+    #[test]
+    fn is_sensitive_param_is_case_insensitive() {
+        assert!(is_sensitive_param("ACCESS_TOKEN"));
+        assert!(is_sensitive_param("Access_Token"));
+        assert!(is_sensitive_param("access_token"));
+        assert!(is_sensitive_param("REFRESH_TOKEN"));
+        assert!(is_sensitive_param("Client_Secret"));
+    }
+
+    #[test]
+    fn is_sensitive_param_does_not_match_safe_params() {
+        let safe_params = ["q", "format", "limit", "offset", "fields", "orderBy"];
+
+        for param in safe_params {
+            assert!(
+                !is_sensitive_param(param),
+                "'{}' should NOT be detected as sensitive",
+                param
+            );
+        }
+    }
+
+    #[test]
+    fn is_sensitive_param_requires_exact_match() {
+        // Should not match partial strings
+        assert!(!is_sensitive_param("access_token_id"));
+        assert!(!is_sensitive_param("my_access_token"));
+        assert!(!is_sensitive_param("tokens"));
+        assert!(!is_sensitive_param("sessions"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HTTP Client Builder Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_http_client_succeeds() {
+        let result = build_http_client();
+        assert!(result.is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LoggingMode Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn logging_mode_default_is_path_only() {
+        let mode = LoggingMode::default();
+        assert_eq!(mode, LoggingMode::PathOnly);
+    }
+}

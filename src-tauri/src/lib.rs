@@ -1,4 +1,5 @@
 pub mod error;
+pub mod salesforce;
 pub mod storage;
 
 use std::sync::{Arc, RwLock};
