@@ -55,6 +55,42 @@ pub enum BulkJobState {
     Unknown,
 }
 
+impl BulkJobState {
+    /// Converts the state to its string representation for database storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BulkJobState::Open => "Open",
+            BulkJobState::UploadComplete => "UploadComplete",
+            BulkJobState::InProgress => "InProgress",
+            BulkJobState::JobComplete => "JobComplete",
+            BulkJobState::Aborted => "Aborted",
+            BulkJobState::Failed => "Failed",
+            BulkJobState::Unknown => "Unknown",
+        }
+    }
+
+    /// Parses a string into a BulkJobState.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "Open" => BulkJobState::Open,
+            "UploadComplete" => BulkJobState::UploadComplete,
+            "InProgress" => BulkJobState::InProgress,
+            "JobComplete" => BulkJobState::JobComplete,
+            "Aborted" => BulkJobState::Aborted,
+            "Failed" => BulkJobState::Failed,
+            _ => BulkJobState::Unknown,
+        }
+    }
+
+    /// Returns true if this is a terminal state (job cannot transition further).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            BulkJobState::JobComplete | BulkJobState::Aborted | BulkJobState::Failed
+        )
+    }
+}
+
 pub use auth::{start_login_flow, LoginType};
 pub use bulk_ingest_v2::{
     BulkIngestJobInfo, BulkIngestV2Client, BulkOperation, CreateIngestJobRequest, LineEnding,

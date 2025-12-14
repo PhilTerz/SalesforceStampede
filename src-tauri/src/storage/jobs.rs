@@ -16,6 +16,59 @@ use crate::salesforce::BulkJobState;
 use crate::storage::database::Database;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GroupState Enum
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// State of a bulk job group (aggregated state of all jobs in the group).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GroupState {
+    /// Group has been created, jobs are being added.
+    Open,
+    /// Jobs are actively being processed.
+    InProgress,
+    /// All jobs completed successfully.
+    Completed,
+    /// One or more jobs failed.
+    Failed,
+    /// Group was aborted by user request.
+    Aborted,
+}
+
+impl GroupState {
+    /// Converts the state to its string representation for database storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GroupState::Open => "Open",
+            GroupState::InProgress => "InProgress",
+            GroupState::Completed => "Completed",
+            GroupState::Failed => "Failed",
+            GroupState::Aborted => "Aborted",
+        }
+    }
+
+    /// Parses a string into a GroupState.
+    /// Returns `Open` for unknown strings as a safe default.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "Open" => GroupState::Open,
+            "InProgress" => GroupState::InProgress,
+            "Completed" => GroupState::Completed,
+            "Failed" => GroupState::Failed,
+            "Aborted" => GroupState::Aborted,
+            _ => GroupState::Open, // Safe default for unknown states
+        }
+    }
+
+    /// Returns true if this is a terminal state (group cannot transition further).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            GroupState::Completed | GroupState::Aborted | GroupState::Failed
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DTOs
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -27,7 +80,7 @@ pub struct BulkJobGroupRow {
     pub org_id: String,
     pub object: String,
     pub operation: String,
-    pub state: String,
+    pub state: GroupState,
     pub batch_size: i64,
     pub total_parts: i64,
     pub created_at: i64,
@@ -40,7 +93,7 @@ pub struct BulkJobRow {
     pub job_id: String,
     pub group_id: String,
     pub part_number: i64,
-    pub state: String,
+    pub state: BulkJobState,
     pub processed_records: Option<i64>,
     pub failed_records: Option<i64>,
     pub error_message: Option<String>,
@@ -120,7 +173,7 @@ pub async fn save_group(db: &Database, group: &BulkJobGroupRow) -> Result<(), Ap
                 group.org_id,
                 group.object,
                 group.operation,
-                group.state,
+                group.state.as_str(),
                 group.batch_size,
                 group.total_parts,
                 group.created_at,
@@ -157,7 +210,7 @@ pub async fn add_job_to_group(db: &Database, job: &BulkJobRow) -> Result<(), App
                 job.job_id,
                 job.group_id,
                 job.part_number,
-                job.state,
+                job.state.as_str(),
                 job.processed_records,
                 job.failed_records,
                 job.error_message,
@@ -179,14 +232,14 @@ pub async fn add_job_to_group(db: &Database, job: &BulkJobRow) -> Result<(), App
 pub async fn update_job_state(
     db: &Database,
     job_id: &str,
-    state: &str,
+    state: BulkJobState,
     processed_records: Option<i64>,
     failed_records: Option<i64>,
     error_message: Option<&str>,
 ) -> Result<(), AppError> {
     let db_path = db.db_path().clone();
     let job_id = job_id.to_string();
-    let state = state.to_string();
+    let state_str = state.as_str().to_string();
     let error_message = error_message.map(|s| s.to_string());
     let updated_at = current_timestamp();
 
@@ -203,7 +256,7 @@ pub async fn update_job_state(
             WHERE job_id = ?6
             "#,
             rusqlite::params![
-                state,
+                state_str,
                 processed_records,
                 failed_records,
                 error_message,
@@ -225,11 +278,11 @@ pub async fn update_job_state(
 pub async fn update_group_state(
     db: &Database,
     group_id: &str,
-    state: &str,
+    state: GroupState,
 ) -> Result<(), AppError> {
     let db_path = db.db_path().clone();
     let group_id = group_id.to_string();
-    let state = state.to_string();
+    let state_str = state.as_str().to_string();
     let updated_at = current_timestamp();
 
     tokio::task::spawn_blocking(move || {
@@ -244,7 +297,7 @@ pub async fn update_group_state(
             SET state = ?1, updated_at = ?2
             WHERE group_id = ?3
             "#,
-            rusqlite::params![state, updated_at, group_id],
+            rusqlite::params![state_str, updated_at, group_id],
         )
         .map_err(|e| AppError::Internal(format!("Failed to update group state: {e}")))?;
 
@@ -277,12 +330,13 @@ pub async fn get_group(db: &Database, group_id: &str) -> Result<BulkJobGroupWith
                 "#,
                 [&group_id],
                 |row| {
+                    let state_str: String = row.get(4)?;
                     Ok(BulkJobGroupRow {
                         group_id: row.get(0)?,
                         org_id: row.get(1)?,
                         object: row.get(2)?,
                         operation: row.get(3)?,
-                        state: row.get(4)?,
+                        state: GroupState::from_str(&state_str),
                         batch_size: row.get(5)?,
                         total_parts: row.get(6)?,
                         created_at: row.get(7)?,
@@ -306,11 +360,12 @@ pub async fn get_group(db: &Database, group_id: &str) -> Result<BulkJobGroupWith
 
         let jobs = stmt
             .query_map([&group_id], |row| {
+                let state_str: String = row.get(3)?;
                 Ok(BulkJobRow {
                     job_id: row.get(0)?,
                     group_id: row.get(1)?,
                     part_number: row.get(2)?,
-                    state: row.get(3)?,
+                    state: BulkJobState::from_str(&state_str),
                     processed_records: row.get(4)?,
                     failed_records: row.get(5)?,
                     error_message: row.get(6)?,
@@ -343,26 +398,32 @@ pub async fn get_active_groups(
 
         configure_connection(&conn)?;
 
-        // Get non-terminal groups
+        // Get non-terminal groups (use GroupState enum for consistency)
+        let terminal_states = [
+            GroupState::Completed.as_str(),
+            GroupState::Failed.as_str(),
+            GroupState::Aborted.as_str(),
+        ];
         let mut stmt = conn
             .prepare(
                 r#"
                 SELECT group_id, org_id, object, operation, state, batch_size, total_parts, created_at, updated_at
                 FROM bulk_job_groups
-                WHERE org_id = ?1 AND state NOT IN ('Completed', 'Failed', 'Aborted')
+                WHERE org_id = ?1 AND state NOT IN (?2, ?3, ?4)
                 ORDER BY created_at DESC
                 "#,
             )
             .map_err(|e| AppError::Internal(format!("Failed to prepare query: {e}")))?;
 
         let groups: Vec<BulkJobGroupRow> = stmt
-            .query_map([&org_id], |row| {
+            .query_map(rusqlite::params![&org_id, terminal_states[0], terminal_states[1], terminal_states[2]], |row| {
+                let state_str: String = row.get(4)?;
                 Ok(BulkJobGroupRow {
                     group_id: row.get(0)?,
                     org_id: row.get(1)?,
                     object: row.get(2)?,
                     operation: row.get(3)?,
-                    state: row.get(4)?,
+                    state: GroupState::from_str(&state_str),
                     batch_size: row.get(5)?,
                     total_parts: row.get(6)?,
                     created_at: row.get(7)?,
@@ -389,11 +450,12 @@ pub async fn get_active_groups(
 
             let jobs = job_stmt
                 .query_map([&group.group_id], |row| {
+                    let state_str: String = row.get(3)?;
                     Ok(BulkJobRow {
                         job_id: row.get(0)?,
                         group_id: row.get(1)?,
                         part_number: row.get(2)?,
-                        state: row.get(3)?,
+                        state: BulkJobState::from_str(&state_str),
                         processed_records: row.get(4)?,
                         failed_records: row.get(5)?,
                         error_message: row.get(6)?,
@@ -430,20 +492,25 @@ pub async fn cleanup_old_jobs(db: &Database, retention_days: i64) -> Result<u64,
             .transaction()
             .map_err(|e| AppError::Internal(format!("Failed to start transaction: {e}")))?;
 
-        // First, get the group IDs to delete
+        // First, get the group IDs to delete (use GroupState enum for consistency)
+        let terminal_states = [
+            GroupState::Completed.as_str(),
+            GroupState::Failed.as_str(),
+            GroupState::Aborted.as_str(),
+        ];
         let group_ids: Vec<String> = {
             let mut stmt = tx
                 .prepare(
                     r#"
                     SELECT group_id FROM bulk_job_groups
-                    WHERE state IN ('Completed', 'Failed', 'Aborted')
-                    AND updated_at < ?1
+                    WHERE state IN (?1, ?2, ?3)
+                    AND updated_at < ?4
                     "#,
                 )
                 .map_err(|e| AppError::Internal(format!("Failed to prepare query: {e}")))?;
 
             let rows = stmt
-                .query_map([cutoff], |row| row.get(0))
+                .query_map(rusqlite::params![terminal_states[0], terminal_states[1], terminal_states[2], cutoff], |row| row.get(0))
                 .map_err(|e| AppError::Internal(format!("Failed to query old groups: {e}")))?;
 
             rows.collect::<Result<Vec<_>, _>>()
@@ -483,19 +550,6 @@ pub async fn cleanup_old_jobs(db: &Database, retention_days: i64) -> Result<u64,
 // Reconciliation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Converts BulkJobState enum to string representation.
-fn state_to_string(state: BulkJobState) -> String {
-    match state {
-        BulkJobState::Open => "Open".to_string(),
-        BulkJobState::UploadComplete => "UploadComplete".to_string(),
-        BulkJobState::InProgress => "InProgress".to_string(),
-        BulkJobState::JobComplete => "JobComplete".to_string(),
-        BulkJobState::Aborted => "Aborted".to_string(),
-        BulkJobState::Failed => "Failed".to_string(),
-        BulkJobState::Unknown => "Unknown".to_string(),
-    }
-}
-
 /// Reconciles in-progress jobs with Salesforce.
 ///
 /// Fetches current status from Salesforce for all non-terminal jobs and updates
@@ -528,7 +582,7 @@ pub async fn reconcile_jobs<P: JobStatusProvider>(
                         db,
                         &job.job_id,
                         &job.group_id,
-                        &state_to_string(info.state),
+                        info.state,
                         info.processed_records.map(|v| v as i64),
                         info.failed_records.map(|v| v as i64),
                         info.error_message.as_deref(),
@@ -541,7 +595,7 @@ pub async fn reconcile_jobs<P: JobStatusProvider>(
                         db,
                         &job.job_id,
                         &job.group_id,
-                        "Failed",
+                        BulkJobState::Failed,
                         None,
                         None,
                         Some("Job not found in Salesforce"),
@@ -582,25 +636,33 @@ async fn get_non_terminal_jobs(
 
         configure_connection(&conn)?;
 
+        // Use BulkJobState enum for terminal states
+        let terminal_states = [
+            BulkJobState::JobComplete.as_str(),
+            BulkJobState::Failed.as_str(),
+            BulkJobState::Aborted.as_str(),
+        ];
+
         let mut stmt = conn
             .prepare(
                 r#"
                 SELECT j.job_id, j.group_id, j.part_number, j.state, j.processed_records, j.failed_records, j.error_message, j.created_at, j.updated_at
                 FROM bulk_jobs j
                 INNER JOIN bulk_job_groups g ON j.group_id = g.group_id
-                WHERE g.org_id = ?1 AND j.state NOT IN ('JobComplete', 'Failed', 'Aborted')
+                WHERE g.org_id = ?1 AND j.state NOT IN (?2, ?3, ?4)
                 ORDER BY j.created_at ASC
                 "#,
             )
             .map_err(|e| AppError::Internal(format!("Failed to prepare query: {e}")))?;
 
         let jobs = stmt
-            .query_map([&org_id], |row| {
+            .query_map(rusqlite::params![&org_id, terminal_states[0], terminal_states[1], terminal_states[2]], |row| {
+                let state_str: String = row.get(3)?;
                 Ok(BulkJobRow {
                     job_id: row.get(0)?,
                     group_id: row.get(1)?,
                     part_number: row.get(2)?,
-                    state: row.get(3)?,
+                    state: BulkJobState::from_str(&state_str),
                     processed_records: row.get(4)?,
                     failed_records: row.get(5)?,
                     error_message: row.get(6)?,
@@ -623,7 +685,7 @@ async fn update_job_and_maybe_group(
     db: &Database,
     job_id: &str,
     group_id: &str,
-    state: &str,
+    state: BulkJobState,
     processed_records: Option<i64>,
     failed_records: Option<i64>,
     error_message: Option<&str>,
@@ -631,9 +693,18 @@ async fn update_job_and_maybe_group(
     let db_path = db.db_path().clone();
     let job_id = job_id.to_string();
     let group_id = group_id.to_string();
-    let state = state.to_string();
+    let state_str = state.as_str().to_string();
     let error_message = error_message.map(|s| s.to_string());
     let updated_at = current_timestamp();
+
+    // Pre-compute terminal state strings for use in the blocking closure
+    let terminal_job_states = [
+        BulkJobState::JobComplete.as_str(),
+        BulkJobState::Failed.as_str(),
+        BulkJobState::Aborted.as_str(),
+    ];
+    let failed_state = BulkJobState::Failed.as_str();
+    let aborted_state = BulkJobState::Aborted.as_str();
 
     tokio::task::spawn_blocking(move || {
         let mut conn = Connection::open(&db_path)
@@ -653,7 +724,7 @@ async fn update_job_and_maybe_group(
             WHERE job_id = ?6
             "#,
             rusqlite::params![
-                state,
+                state_str,
                 processed_records,
                 failed_records,
                 error_message,
@@ -668,9 +739,9 @@ async fn update_job_and_maybe_group(
             .query_row(
                 r#"
                 SELECT COUNT(*) FROM bulk_jobs
-                WHERE group_id = ?1 AND state NOT IN ('JobComplete', 'Failed', 'Aborted')
+                WHERE group_id = ?1 AND state NOT IN (?2, ?3, ?4)
                 "#,
-                [&group_id],
+                rusqlite::params![&group_id, terminal_job_states[0], terminal_job_states[1], terminal_job_states[2]],
                 |row| row.get(0),
             )
             .map_err(|e| AppError::Internal(format!("Failed to count non-terminal jobs: {e}")))?;
@@ -679,31 +750,31 @@ async fn update_job_and_maybe_group(
             // All jobs are terminal - compute group state
             let has_failed: bool = tx
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM bulk_jobs WHERE group_id = ?1 AND state = 'Failed')",
-                    [&group_id],
+                    "SELECT EXISTS(SELECT 1 FROM bulk_jobs WHERE group_id = ?1 AND state = ?2)",
+                    rusqlite::params![&group_id, failed_state],
                     |row| row.get(0),
                 )
                 .map_err(|e| AppError::Internal(format!("Failed to check failed jobs: {e}")))?;
 
             let has_aborted: bool = tx
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM bulk_jobs WHERE group_id = ?1 AND state = 'Aborted')",
-                    [&group_id],
+                    "SELECT EXISTS(SELECT 1 FROM bulk_jobs WHERE group_id = ?1 AND state = ?2)",
+                    rusqlite::params![&group_id, aborted_state],
                     |row| row.get(0),
                 )
                 .map_err(|e| AppError::Internal(format!("Failed to check aborted jobs: {e}")))?;
 
             let new_group_state = if has_failed {
-                "Failed"
+                GroupState::Failed
             } else if has_aborted {
-                "Aborted"
+                GroupState::Aborted
             } else {
-                "Completed"
+                GroupState::Completed
             };
 
             tx.execute(
                 "UPDATE bulk_job_groups SET state = ?1, updated_at = ?2 WHERE group_id = ?3",
-                rusqlite::params![new_group_state, updated_at, group_id],
+                rusqlite::params![new_group_state.as_str(), updated_at, group_id],
             )
             .map_err(|e| AppError::Internal(format!("Failed to update group state: {e}")))?;
         }
@@ -814,7 +885,7 @@ mod tests {
             org_id: "org-456".to_string(),
             object: "Account".to_string(),
             operation: "insert".to_string(),
-            state: "Open".to_string(),
+            state: GroupState::Open,
             batch_size: 10000,
             total_parts: 2,
             created_at: timestamp,
@@ -828,7 +899,7 @@ mod tests {
             job_id: "sf-job-1".to_string(),
             group_id: "group-123".to_string(),
             part_number: 1,
-            state: "Open".to_string(),
+            state: BulkJobState::Open,
             processed_records: None,
             failed_records: None,
             error_message: None,
@@ -840,7 +911,7 @@ mod tests {
             job_id: "sf-job-2".to_string(),
             group_id: "group-123".to_string(),
             part_number: 2,
-            state: "Open".to_string(),
+            state: BulkJobState::Open,
             processed_records: None,
             failed_records: None,
             error_message: None,
@@ -876,7 +947,7 @@ mod tests {
             org_id: "org-1".to_string(),
             object: "Contact".to_string(),
             operation: "update".to_string(),
-            state: "InProgress".to_string(),
+            state: GroupState::InProgress,
             batch_size: 5000,
             total_parts: 1,
             created_at: timestamp,
@@ -888,7 +959,7 @@ mod tests {
             job_id: "sf-job-abc".to_string(),
             group_id: "group-1".to_string(),
             part_number: 1,
-            state: "InProgress".to_string(),
+            state: BulkJobState::InProgress,
             processed_records: Some(100),
             failed_records: Some(0),
             error_message: None,
@@ -901,7 +972,7 @@ mod tests {
         update_job_state(
             &db,
             "sf-job-abc",
-            "JobComplete",
+            BulkJobState::JobComplete,
             Some(500),
             Some(5),
             None,
@@ -913,7 +984,7 @@ mod tests {
         let result = get_group(&db, "group-1").await.expect("Failed to get group");
         let updated_job = &result.jobs[0];
 
-        assert_eq!(updated_job.state, "JobComplete");
+        assert_eq!(updated_job.state, BulkJobState::JobComplete);
         assert_eq!(updated_job.processed_records, Some(500));
         assert_eq!(updated_job.failed_records, Some(5));
         assert!(updated_job.updated_at >= timestamp);
@@ -931,7 +1002,7 @@ mod tests {
             org_id: "org-1".to_string(),
             object: "Lead".to_string(),
             operation: "insert".to_string(),
-            state: "InProgress".to_string(),
+            state: GroupState::InProgress,
             batch_size: 1000,
             total_parts: 1,
             created_at: timestamp,
@@ -943,7 +1014,7 @@ mod tests {
             job_id: "sf-job-err".to_string(),
             group_id: "group-err".to_string(),
             part_number: 1,
-            state: "InProgress".to_string(),
+            state: BulkJobState::InProgress,
             processed_records: None,
             failed_records: None,
             error_message: None,
@@ -956,7 +1027,7 @@ mod tests {
         update_job_state(
             &db,
             "sf-job-err",
-            "Failed",
+            BulkJobState::Failed,
             Some(0),
             Some(100),
             Some("Invalid field mapping"),
@@ -965,7 +1036,7 @@ mod tests {
         .unwrap();
 
         let result = get_group(&db, "group-err").await.unwrap();
-        assert_eq!(result.jobs[0].state, "Failed");
+        assert_eq!(result.jobs[0].state, BulkJobState::Failed);
         assert_eq!(
             result.jobs[0].error_message,
             Some("Invalid field mapping".to_string())
@@ -985,18 +1056,18 @@ mod tests {
 
         // Create groups with different states
         for (id, state) in [
-            ("g1", "Open"),
-            ("g2", "InProgress"),
-            ("g3", "Completed"),
-            ("g4", "Failed"),
-            ("g5", "Aborted"),
+            ("g1", GroupState::Open),
+            ("g2", GroupState::InProgress),
+            ("g3", GroupState::Completed),
+            ("g4", GroupState::Failed),
+            ("g5", GroupState::Aborted),
         ] {
             let group = BulkJobGroupRow {
                 group_id: id.to_string(),
                 org_id: "test-org".to_string(),
                 object: "Account".to_string(),
                 operation: "insert".to_string(),
-                state: state.to_string(),
+                state,
                 batch_size: 1000,
                 total_parts: 1,
                 created_at: timestamp,
@@ -1010,12 +1081,12 @@ mod tests {
 
         // Should only return Open and InProgress
         assert_eq!(active.len(), 2);
-        let states: Vec<_> = active.iter().map(|g| g.group.state.as_str()).collect();
-        assert!(states.contains(&"Open"));
-        assert!(states.contains(&"InProgress"));
-        assert!(!states.contains(&"Completed"));
-        assert!(!states.contains(&"Failed"));
-        assert!(!states.contains(&"Aborted"));
+        let states: Vec<_> = active.iter().map(|g| g.group.state).collect();
+        assert!(states.contains(&GroupState::Open));
+        assert!(states.contains(&GroupState::InProgress));
+        assert!(!states.contains(&GroupState::Completed));
+        assert!(!states.contains(&GroupState::Failed));
+        assert!(!states.contains(&GroupState::Aborted));
     }
 
     #[tokio::test]
@@ -1032,7 +1103,7 @@ mod tests {
                 org_id: org.to_string(),
                 object: "Account".to_string(),
                 operation: "insert".to_string(),
-                state: "InProgress".to_string(),
+                state: GroupState::InProgress,
                 batch_size: 1000,
                 total_parts: 1,
                 created_at: timestamp,
@@ -1066,7 +1137,7 @@ mod tests {
             org_id: "org-1".to_string(),
             object: "Account".to_string(),
             operation: "insert".to_string(),
-            state: "Completed".to_string(),
+            state: GroupState::Completed,
             batch_size: 1000,
             total_parts: 1,
             created_at: old_ts,
@@ -1078,7 +1149,7 @@ mod tests {
             job_id: "old-job".to_string(),
             group_id: "old-group".to_string(),
             part_number: 1,
-            state: "JobComplete".to_string(),
+            state: BulkJobState::JobComplete,
             processed_records: Some(100),
             failed_records: Some(0),
             error_message: None,
@@ -1093,7 +1164,7 @@ mod tests {
             org_id: "org-1".to_string(),
             object: "Account".to_string(),
             operation: "insert".to_string(),
-            state: "Completed".to_string(),
+            state: GroupState::Completed,
             batch_size: 1000,
             total_parts: 1,
             created_at: now_ts,
@@ -1107,7 +1178,7 @@ mod tests {
             org_id: "org-1".to_string(),
             object: "Account".to_string(),
             operation: "insert".to_string(),
-            state: "InProgress".to_string(),
+            state: GroupState::InProgress,
             batch_size: 1000,
             total_parts: 1,
             created_at: old_ts,
@@ -1151,7 +1222,7 @@ mod tests {
             org_id: "reconcile-org".to_string(),
             object: "Account".to_string(),
             operation: "insert".to_string(),
-            state: "InProgress".to_string(),
+            state: GroupState::InProgress,
             batch_size: 5000,
             total_parts: 2,
             created_at: timestamp,
@@ -1163,7 +1234,7 @@ mod tests {
             job_id: "job-a".to_string(),
             group_id: "reconcile-group".to_string(),
             part_number: 1,
-            state: "InProgress".to_string(),
+            state: BulkJobState::InProgress,
             processed_records: None,
             failed_records: None,
             error_message: None,
@@ -1174,7 +1245,7 @@ mod tests {
             job_id: "job-b".to_string(),
             group_id: "reconcile-group".to_string(),
             part_number: 2,
-            state: "InProgress".to_string(),
+            state: BulkJobState::InProgress,
             processed_records: None,
             failed_records: None,
             error_message: None,
@@ -1224,12 +1295,12 @@ mod tests {
         let result = get_group(&db, "reconcile-group").await.unwrap();
 
         let job_a_updated = result.jobs.iter().find(|j| j.job_id == "job-a").unwrap();
-        assert_eq!(job_a_updated.state, "JobComplete");
+        assert_eq!(job_a_updated.state, BulkJobState::JobComplete);
         assert_eq!(job_a_updated.processed_records, Some(1000));
         assert_eq!(job_a_updated.failed_records, Some(0));
 
         let job_b_updated = result.jobs.iter().find(|j| j.job_id == "job-b").unwrap();
-        assert_eq!(job_b_updated.state, "Failed");
+        assert_eq!(job_b_updated.state, BulkJobState::Failed);
         assert_eq!(job_b_updated.processed_records, Some(0));
         assert_eq!(job_b_updated.failed_records, Some(500));
         assert_eq!(
@@ -1238,7 +1309,7 @@ mod tests {
         );
 
         // Group should be Failed (because one job failed)
-        assert_eq!(result.group.state, "Failed");
+        assert_eq!(result.group.state, GroupState::Failed);
     }
 
     #[tokio::test]
@@ -1253,7 +1324,7 @@ mod tests {
             org_id: "success-org".to_string(),
             object: "Contact".to_string(),
             operation: "insert".to_string(),
-            state: "InProgress".to_string(),
+            state: GroupState::InProgress,
             batch_size: 1000,
             total_parts: 1,
             created_at: timestamp,
@@ -1265,7 +1336,7 @@ mod tests {
             job_id: "success-job".to_string(),
             group_id: "success-group".to_string(),
             part_number: 1,
-            state: "InProgress".to_string(),
+            state: BulkJobState::InProgress,
             processed_records: None,
             failed_records: None,
             error_message: None,
@@ -1291,6 +1362,6 @@ mod tests {
         reconcile_jobs(&db, &provider, "success-org").await.unwrap();
 
         let result = get_group(&db, "success-group").await.unwrap();
-        assert_eq!(result.group.state, "Completed");
+        assert_eq!(result.group.state, GroupState::Completed);
     }
 }
