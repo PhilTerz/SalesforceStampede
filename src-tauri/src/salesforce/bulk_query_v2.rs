@@ -25,7 +25,7 @@ use tracing::info;
 use url::Url;
 
 use crate::error::AppError;
-use crate::salesforce::API_VERSION;
+use crate::salesforce::{BulkJobState, API_VERSION};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -42,26 +42,6 @@ const SFORCE_NUMBER_OF_RECORDS_HEADER: &str = "Sforce-NumberOfRecords";
 // Public Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// State of a Bulk API v2 query job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BulkQueryJobState {
-    /// Job has been created but query is not yet uploaded.
-    Open,
-    /// Query has been uploaded, job is queued for processing.
-    UploadComplete,
-    /// Job is actively being processed.
-    InProgress,
-    /// Job completed successfully.
-    JobComplete,
-    /// Job was aborted by user request.
-    Aborted,
-    /// Job failed due to an error.
-    Failed,
-    /// Catch-all for unexpected states to prevent deserialization panic.
-    #[serde(other)]
-    Unknown,
-}
-
 /// Information about a Bulk API v2 query job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,7 +49,7 @@ pub struct BulkQueryJobInfo {
     /// Unique identifier for the job.
     pub id: String,
     /// Current state of the job.
-    pub state: BulkQueryJobState,
+    pub state: BulkJobState,
     /// Number of records processed so far.
     #[serde(default)]
     pub number_records_processed: Option<u64>,
@@ -229,7 +209,7 @@ impl BulkQueryV2Client {
         })?;
 
         // Check for failed state
-        if job_info.state == BulkQueryJobState::Failed {
+        if job_info.state == BulkJobState::Failed {
             return Err(AppError::JobFailed {
                 job_id: job_id.to_string(),
                 message: job_info
@@ -709,17 +689,17 @@ mod tests {
     #[test]
     fn test_job_state_deserialization() {
         let test_cases = [
-            (r#""Open""#, BulkQueryJobState::Open),
-            (r#""UploadComplete""#, BulkQueryJobState::UploadComplete),
-            (r#""InProgress""#, BulkQueryJobState::InProgress),
-            (r#""JobComplete""#, BulkQueryJobState::JobComplete),
-            (r#""Aborted""#, BulkQueryJobState::Aborted),
-            (r#""Failed""#, BulkQueryJobState::Failed),
-            (r#""SomeNewState""#, BulkQueryJobState::Unknown),
+            (r#""Open""#, BulkJobState::Open),
+            (r#""UploadComplete""#, BulkJobState::UploadComplete),
+            (r#""InProgress""#, BulkJobState::InProgress),
+            (r#""JobComplete""#, BulkJobState::JobComplete),
+            (r#""Aborted""#, BulkJobState::Aborted),
+            (r#""Failed""#, BulkJobState::Failed),
+            (r#""SomeNewState""#, BulkJobState::Unknown),
         ];
 
         for (json, expected) in test_cases {
-            let result: BulkQueryJobState = serde_json::from_str(json).unwrap();
+            let result: BulkJobState = serde_json::from_str(json).unwrap();
             assert_eq!(result, expected, "Failed for input: {}", json);
         }
     }
@@ -737,7 +717,7 @@ mod tests {
         let info: BulkQueryJobInfo = serde_json::from_str(json).unwrap();
 
         assert_eq!(info.id, "750xx000000001ABC");
-        assert_eq!(info.state, BulkQueryJobState::InProgress);
+        assert_eq!(info.state, BulkJobState::InProgress);
         assert_eq!(info.number_records_processed, Some(1000));
         assert_eq!(info.number_records_failed, Some(5));
         assert!(info.error_message.is_none());
@@ -773,7 +753,7 @@ mod tests {
 
         assert!(result.is_ok());
         let info = result.unwrap();
-        assert_eq!(info.state, BulkQueryJobState::JobComplete);
+        assert_eq!(info.state, BulkJobState::JobComplete);
         assert_eq!(info.number_records_processed, Some(5000));
     }
 

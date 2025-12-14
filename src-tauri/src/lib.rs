@@ -3,10 +3,17 @@ pub mod error;
 pub mod salesforce;
 pub mod state;
 pub mod storage;
+pub mod streaming;
+pub mod validation;
 
 use tauri::Manager;
 
-use crate::commands::{get_active_org, list_orgs, login, logout, switch_org};
+use crate::commands::{
+    // Auth commands
+    get_active_org, list_orgs, login, logout, switch_org,
+    // Query commands
+    execute_query, save_query, get_saved_queries, delete_saved_query, get_query_history,
+};
 use crate::state::AppState;
 use crate::storage::Database;
 
@@ -44,11 +51,18 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            // Auth commands
             login,
             list_orgs,
             switch_org,
             get_active_org,
             logout,
+            // Query commands
+            execute_query,
+            save_query,
+            get_saved_queries,
+            delete_saved_query,
+            get_query_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

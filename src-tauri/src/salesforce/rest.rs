@@ -117,7 +117,7 @@ impl RestQueryClient {
     /// The SOQL query is never logged to prevent leaking sensitive field names
     /// or filter criteria.
     pub async fn query(&self, soql: &str) -> Result<QueryResult, AppError> {
-        self.query_internal(soql, None).await
+        self.query_internal(soql, None, None::<fn(u64)>).await
     }
 
     /// Executes a SOQL query and returns up to `max_rows` records.
@@ -145,15 +145,51 @@ impl RestQueryClient {
         soql: &str,
         max_rows: u64,
     ) -> Result<QueryResult, AppError> {
-        self.query_internal(soql, Some(max_rows)).await
+        self.query_internal(soql, Some(max_rows), None::<fn(u64)>).await
     }
 
-    /// Internal query implementation with optional row limit.
-    async fn query_internal(
+    /// Executes a SOQL query with an optional progress callback and row limit.
+    ///
+    /// The progress callback is invoked after each page is fetched with the
+    /// current total number of records retrieved.
+    ///
+    /// # Arguments
+    ///
+    /// * `soql` - The SOQL query to execute
+    /// * `max_rows` - Optional maximum number of records to return
+    /// * `on_progress` - Optional callback invoked with current record count after each page
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let result = client.query_with_progress(
+    ///     "SELECT Id FROM Account",
+    ///     Some(1000),
+    ///     Some(|count| println!("Fetched {} records", count)),
+    /// ).await?;
+    /// ```
+    pub async fn query_with_progress<F>(
         &self,
         soql: &str,
         max_rows: Option<u64>,
-    ) -> Result<QueryResult, AppError> {
+        on_progress: Option<F>,
+    ) -> Result<QueryResult, AppError>
+    where
+        F: Fn(u64),
+    {
+        self.query_internal(soql, max_rows, on_progress).await
+    }
+
+    /// Internal query implementation with optional row limit and progress callback.
+    async fn query_internal<F>(
+        &self,
+        soql: &str,
+        max_rows: Option<u64>,
+        on_progress: Option<F>,
+    ) -> Result<QueryResult, AppError>
+    where
+        F: Fn(u64),
+    {
         // Build initial query URL with properly encoded SOQL
         let base_path = format!("/services/data/{}/query", API_VERSION);
         let initial_url = self.build_query_url(&base_path, soql).await?;
@@ -187,6 +223,11 @@ impl RestQueryClient {
 
             // Append records
             all_records.extend(wire_response.records);
+
+            // Invoke progress callback with current record count
+            if let Some(ref callback) = on_progress {
+                callback(all_records.len() as u64);
+            }
 
             // Check if we should stop due to row limit
             if let Some(limit) = max_rows {

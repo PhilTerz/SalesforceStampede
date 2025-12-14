@@ -51,6 +51,16 @@ pub enum AppError {
     #[error("Failed to bind OAuth callback port")]
     PortBindFailed,
 
+    #[error("No active org selected")]
+    NoActiveOrg,
+
+    // ── Query Strategy ───────────────────────────────────────────────────────
+    #[error("Strategy selection required: {reason}")]
+    StrategySelectionRequired {
+        reason: String,
+        suggested_strategy: String,
+    },
+
     // ── API ───────────────────────────────────────────────────────────────────
     #[error("Salesforce error: {0}")]
     SalesforceError(String),
@@ -122,6 +132,19 @@ impl AppError {
                 title: "Login Unavailable".into(),
                 message: "Could not start the login process. Another application may be using the required port.".into(),
                 action: Some("Close other applications and try again".into()),
+            },
+
+            AppError::NoActiveOrg => ErrorPresentation {
+                title: "No Org Selected".into(),
+                message: "Please select a Salesforce org to continue.".into(),
+                action: Some("Select an org".into()),
+            },
+
+            // ── Query Strategy ───────────────────────────────────────────────
+            AppError::StrategySelectionRequired { reason, suggested_strategy } => ErrorPresentation {
+                title: "Query Strategy Required".into(),
+                message: format!("{} Suggested: {}", reason, suggested_strategy),
+                action: Some("Choose a query strategy".into()),
             },
 
             // ── API ───────────────────────────────────────────────────────────
@@ -233,6 +256,12 @@ mod tests {
             AppError::SessionExpired,
             AppError::OAuthError("test oauth error".into()),
             AppError::PortBindFailed,
+            AppError::NoActiveOrg,
+            // Query Strategy
+            AppError::StrategySelectionRequired {
+                reason: "Large dataset detected".into(),
+                suggested_strategy: "Bulk".into(),
+            },
             // API
             AppError::SalesforceError("test sf error".into()),
             AppError::RateLimited { retry_after_secs: Some(30) },
