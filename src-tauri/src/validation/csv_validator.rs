@@ -154,9 +154,9 @@ pub async fn validate(path: &Path) -> Result<CsvValidationResult, AppError> {
     let mut warnings = Vec::new();
 
     // Step 1: Get file metadata
-    let metadata = tokio::fs::metadata(path).await.map_err(|e| {
-        AppError::Internal(format!("Failed to read file metadata: {}", e))
-    })?;
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read file metadata: {}", e)))?;
 
     let file_size_bytes = metadata.len();
 
@@ -188,13 +188,13 @@ pub async fn validate(path: &Path) -> Result<CsvValidationResult, AppError> {
     let sample_size = (file_size_bytes as usize).min(VALIDATION_SAMPLE_SIZE);
     let mut buffer = vec![0u8; sample_size];
 
-    let mut file = File::open(path).await.map_err(|e| {
-        AppError::Internal(format!("Failed to open file: {}", e))
-    })?;
+    let mut file = File::open(path)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to open file: {}", e)))?;
 
-    file.read_exact(&mut buffer).await.map_err(|e| {
-        AppError::Internal(format!("Failed to read file: {}", e))
-    })?;
+    file.read_exact(&mut buffer)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read file: {}", e)))?;
 
     let sample_bytes = sample_size as u64;
     let is_sample_only = file_size_bytes > sample_bytes;
@@ -339,9 +339,7 @@ pub async fn validate(path: &Path) -> Result<CsvValidationResult, AppError> {
 
     // Step 8: Sample-only warning
     if is_sample_only {
-        warnings.push(CsvValidationWarning::SampleOnlyValidation {
-            validated_rows,
-        });
+        warnings.push(CsvValidationWarning::SampleOnlyValidation { validated_rows });
     }
 
     // Step 9: Estimate total rows
@@ -429,7 +427,8 @@ mod tests {
     /// Helper to create a temp file with the given content.
     fn create_temp_csv(content: &[u8]) -> NamedTempFile {
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
-        file.write_all(content).expect("Failed to write to temp file");
+        file.write_all(content)
+            .expect("Failed to write to temp file");
         file.flush().expect("Failed to flush temp file");
         file
     }
@@ -444,7 +443,9 @@ mod tests {
         let invalid_utf8 = b"Name,Value\n\xff\xfe,123\n";
         let file = create_temp_csv(invalid_utf8);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert!(!result.ok, "Validation should fail for non-UTF8");
         assert!(
@@ -466,7 +467,9 @@ mod tests {
 
         let file = create_temp_csv(&content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert!(result.ok, "Validation should succeed with BOM");
         assert!(
@@ -505,7 +508,9 @@ mod tests {
 
         let file = create_temp_csv(&content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         // Should succeed because truncation at end should be ignored
         assert!(
@@ -514,7 +519,10 @@ mod tests {
             result.errors
         );
         assert!(
-            result.warnings.iter().any(|w| matches!(w, CsvValidationWarning::SampleOnlyValidation { .. })),
+            result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, CsvValidationWarning::SampleOnlyValidation { .. })),
             "Should have sample-only warning"
         );
     }
@@ -528,9 +536,14 @@ mod tests {
         let content = b"Name,Value\nAlice,100\nBob,200,ExtraColumn\nCharlie,300\n";
         let file = create_temp_csv(content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
-        assert!(!result.ok, "Validation should fail for inconsistent columns");
+        assert!(
+            !result.ok,
+            "Validation should fail for inconsistent columns"
+        );
         let has_inconsistent_error = result.errors.iter().any(|e| {
             matches!(
                 e,
@@ -557,7 +570,9 @@ mod tests {
         let content = b"Name,Desc\n\"John\",\"Line1\nLine2\"\n";
         let file = create_temp_csv(content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert!(result.ok, "Validation should succeed with quoted newlines");
         assert_eq!(result.stats.headers, vec!["Name", "Desc"]);
@@ -576,7 +591,9 @@ mod tests {
     async fn test_empty_file_error() {
         let file = create_temp_csv(b"");
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert!(!result.ok, "Validation should fail for empty file");
         assert!(
@@ -590,7 +607,9 @@ mod tests {
         let content = b"Name,Value,Description\n";
         let file = create_temp_csv(content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert!(result.ok, "Validation should succeed with headers only");
         assert_eq!(result.stats.headers, vec!["Name", "Value", "Description"]);
@@ -602,7 +621,9 @@ mod tests {
         let content = b"Name,Value\nAlice,100\nBob,200\n";
         let file = create_temp_csv(content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert_eq!(result.stats.line_endings, LineEndings::LF);
     }
@@ -612,7 +633,9 @@ mod tests {
         let content = b"Name,Value\r\nAlice,100\r\nBob,200\r\n";
         let file = create_temp_csv(content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert_eq!(result.stats.line_endings, LineEndings::CRLF);
     }
@@ -622,11 +645,15 @@ mod tests {
         let content = b"Name,Value\r\nAlice,100\nBob,200\r\n";
         let file = create_temp_csv(content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert_eq!(result.stats.line_endings, LineEndings::Mixed);
         assert!(
-            result.warnings.contains(&CsvValidationWarning::MixedLineEndings),
+            result
+                .warnings
+                .contains(&CsvValidationWarning::MixedLineEndings),
             "Should warn about mixed line endings"
         );
     }
@@ -636,7 +663,9 @@ mod tests {
         let content = b"Id,Name,Email,Score\n1,Alice,alice@example.com,95\n2,Bob,bob@example.com,87\n3,Charlie,charlie@example.com,92\n";
         let file = create_temp_csv(content);
 
-        let result = validate(file.path()).await.expect("Validation should not fail");
+        let result = validate(file.path())
+            .await
+            .expect("Validation should not fail");
 
         assert!(result.ok, "Validation should succeed");
         assert!(result.errors.is_empty(), "Should have no errors");

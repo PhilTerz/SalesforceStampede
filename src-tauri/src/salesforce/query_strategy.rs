@@ -88,12 +88,7 @@ const BULK_THRESHOLD: u64 = 50_000;
 
 /// Patterns that indicate a query cannot be reliably converted to COUNT.
 /// These are checked case-insensitively.
-const UNSUPPORTED_PATTERNS: &[&str] = &[
-    "group by",
-    "having",
-    "with rollup",
-    "offset",
-];
+const UNSUPPORTED_PATTERNS: &[&str] = &["group by", "having", "with rollup", "offset"];
 
 /// Attempt to rewrite a SOQL query into a COUNT form.
 ///
@@ -284,9 +279,9 @@ pub async fn count_query(
 ///
 /// The expr0 field can be a number or a string representation.
 fn parse_count_result(records: &[serde_json::Value]) -> Result<CountResult, AppError> {
-    let record = records.first().ok_or_else(|| {
-        AppError::SalesforceError("COUNT query returned no records".to_string())
-    })?;
+    let record = records
+        .first()
+        .ok_or_else(|| AppError::SalesforceError("COUNT query returned no records".to_string()))?;
 
     let expr0 = record.get("expr0").ok_or_else(|| {
         AppError::SalesforceError("COUNT response missing expr0 field".to_string())
@@ -298,9 +293,8 @@ fn parse_count_result(records: &[serde_json::Value]) -> Result<CountResult, AppE
     } else if let Some(n) = expr0.as_i64() {
         n as u64
     } else if let Some(s) = expr0.as_str() {
-        s.parse::<u64>().map_err(|_| {
-            AppError::SalesforceError(format!("Cannot parse COUNT value: {}", s))
-        })?
+        s.parse::<u64>()
+            .map_err(|_| AppError::SalesforceError(format!("Cannot parse COUNT value: {}", s)))?
     } else if let Some(n) = expr0.as_f64() {
         n as u64
     } else {
@@ -346,9 +340,7 @@ pub fn determine_strategy_from_count(count: u64) -> QueryStrategy {
 /// - `StrategyDecision::NeedUserDecision { .. }` - User input required
 pub fn determine_strategy(_soql: &str, count: CountResult) -> StrategyDecision {
     match count {
-        CountResult::Count(n) => {
-            StrategyDecision::Determined(determine_strategy_from_count(n))
-        }
+        CountResult::Count(n) => StrategyDecision::Determined(determine_strategy_from_count(n)),
         CountResult::TimedOut => {
             // Suggest Bulk because if COUNT timed out, the query is likely
             // touching a large number of records or has complex filters
@@ -359,14 +351,12 @@ pub fn determine_strategy(_soql: &str, count: CountResult) -> StrategyDecision {
                     .to_string(),
             }
         }
-        CountResult::Unsupported => {
-            StrategyDecision::NeedUserDecision {
-                suggested: QueryStrategy::Rest,
-                reason: "COUNT is not supported for this query shape (e.g., GROUP BY, HAVING). \
+        CountResult::Unsupported => StrategyDecision::NeedUserDecision {
+            suggested: QueryStrategy::Rest,
+            reason: "COUNT is not supported for this query shape (e.g., GROUP BY, HAVING). \
                          Please select a query method."
-                    .to_string(),
-            }
-        }
+                .to_string(),
+        },
     }
 }
 
@@ -460,7 +450,7 @@ mod tests {
     fn make_count_soql_with_nested_subquery() {
         // The subquery has its own FROM, but we should find the top-level FROM
         let result = make_count_soql(
-            "SELECT Id, (SELECT Id FROM Contacts) FROM Account WHERE Active__c = true"
+            "SELECT Id, (SELECT Id FROM Contacts) FROM Account WHERE Active__c = true",
         );
         assert!(result.is_ok());
         assert_eq!(
@@ -490,7 +480,7 @@ mod tests {
     #[test]
     fn make_count_soql_having_returns_none() {
         let result = make_count_soql(
-            "SELECT COUNT(Id), Type FROM Account GROUP BY Type HAVING COUNT(Id) > 10"
+            "SELECT COUNT(Id), Type FROM Account GROUP BY Type HAVING COUNT(Id) > 10",
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
@@ -517,9 +507,7 @@ mod tests {
 
     #[test]
     fn make_count_soql_with_order_by_and_limit() {
-        let result = make_count_soql(
-            "SELECT Id, Name FROM Account ORDER BY Name LIMIT 100"
-        );
+        let result = make_count_soql("SELECT Id, Name FROM Account ORDER BY Name LIMIT 100");
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),
@@ -529,9 +517,7 @@ mod tests {
 
     #[test]
     fn make_count_soql_handles_escaped_quotes() {
-        let result = make_count_soql(
-            r"SELECT Id FROM Account WHERE Name = 'O\'Brien'"
-        );
+        let result = make_count_soql(r"SELECT Id FROM Account WHERE Name = 'O\'Brien'");
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),
@@ -608,7 +594,10 @@ mod tests {
 
     #[test]
     fn strategy_large_count() {
-        assert_eq!(determine_strategy_from_count(1_000_000), QueryStrategy::Bulk);
+        assert_eq!(
+            determine_strategy_from_count(1_000_000),
+            QueryStrategy::Bulk
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -715,10 +704,12 @@ mod tests {
 
     #[test]
     fn redact_multiple_strings() {
-        let result = redact_soql_literals(
-            "SELECT Id FROM Account WHERE Name = 'First' AND Type = 'Second'"
+        let result =
+            redact_soql_literals("SELECT Id FROM Account WHERE Name = 'First' AND Type = 'Second'");
+        assert_eq!(
+            result,
+            "SELECT Id FROM Account WHERE Name = '?' AND Type = '?'"
         );
-        assert_eq!(result, "SELECT Id FROM Account WHERE Name = '?' AND Type = '?'");
     }
 
     #[test]

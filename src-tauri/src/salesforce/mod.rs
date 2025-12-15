@@ -99,7 +99,7 @@ pub use bulk_query_v2::{BulkQueryJobInfo, BulkQueryV2Client};
 pub use bulk_scheduler::{BulkJobPermit, BulkJobScheduler};
 pub use client::{LoggingMode, OrgCredentials, SalesforceClient};
 pub use query_strategy::{
-    count_query, determine_strategy, determine_strategy_from_count, make_count_soql,
-    CountResult, QueryPreferences, QueryStrategy, StrategyDecision,
+    count_query, determine_strategy, determine_strategy_from_count, make_count_soql, CountResult,
+    QueryPreferences, QueryStrategy, StrategyDecision,
 };
 pub use rest::{QueryResult, RestQueryClient};

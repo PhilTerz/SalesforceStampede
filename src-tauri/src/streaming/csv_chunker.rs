@@ -638,8 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chunk_config_builder() {
-        let config = ChunkConfig::with_batch_size(BatchSize::Small)
-            .max_bytes(50 * 1024 * 1024);
+        let config = ChunkConfig::with_batch_size(BatchSize::Small).max_bytes(50 * 1024 * 1024);
 
         assert_eq!(config.max_records, 200);
         assert_eq!(config.max_bytes, 50 * 1024 * 1024);

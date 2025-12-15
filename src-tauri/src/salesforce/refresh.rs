@@ -15,7 +15,8 @@ use crate::error::AppError;
 
 /// OAuth Client ID for the Salesforce Connected App.
 /// Must match the CLIENT_ID used in auth.rs.
-pub(crate) const CLIENT_ID: &str = "3MVG9PwZx9R6_Ur.SFyEjmQZHmZd3aODqPzxLowB4KLoLmG8LTk.7n_XNfBF5cRFq5TqX3Hk62I33LIb_85V4";
+pub(crate) const CLIENT_ID: &str =
+    "3MVG9PwZx9R6_Ur.SFyEjmQZHmZd3aODqPzxLowB4KLoLmG8LTk.7n_XNfBF5cRFq5TqX3Hk62I33LIb_85V4";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Response Types
@@ -164,7 +165,9 @@ mod tests {
     fn get_login_url_scratch_org() {
         // Scratch orgs use "--" in their URL
         assert_eq!(
-            get_login_url_for_refresh("https://ability-inspiration-1234--dev.scratch.my.salesforce.com"),
+            get_login_url_for_refresh(
+                "https://ability-inspiration-1234--dev.scratch.my.salesforce.com"
+            ),
             "https://test.salesforce.com"
         );
     }
@@ -207,13 +210,8 @@ mod wiremock_tests {
         let http = reqwest::Client::new();
         let refresh_token = SecretString::from("test_refresh_token".to_string());
 
-        let result = refresh_access_token(
-            &http,
-            &mock_server.uri(),
-            &refresh_token,
-            "test_client_id",
-        )
-        .await;
+        let result =
+            refresh_access_token(&http, &mock_server.uri(), &refresh_token, "test_client_id").await;
 
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -239,13 +237,8 @@ mod wiremock_tests {
         let http = reqwest::Client::new();
         let refresh_token = SecretString::from("expired_token".to_string());
 
-        let result = refresh_access_token(
-            &http,
-            &mock_server.uri(),
-            &refresh_token,
-            "test_client_id",
-        )
-        .await;
+        let result =
+            refresh_access_token(&http, &mock_server.uri(), &refresh_token, "test_client_id").await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(AppError::SessionExpired)));
@@ -269,13 +262,8 @@ mod wiremock_tests {
         let http = reqwest::Client::new();
         let refresh_token = SecretString::from("invalid_token".to_string());
 
-        let result = refresh_access_token(
-            &http,
-            &mock_server.uri(),
-            &refresh_token,
-            "test_client_id",
-        )
-        .await;
+        let result =
+            refresh_access_token(&http, &mock_server.uri(), &refresh_token, "test_client_id").await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(AppError::SessionExpired)));
@@ -302,13 +290,8 @@ mod wiremock_tests {
         let http = reqwest::Client::new();
         let refresh_token = SecretString::from("my_refresh_token".to_string());
 
-        let result = refresh_access_token(
-            &http,
-            &mock_server.uri(),
-            &refresh_token,
-            "my_client_id",
-        )
-        .await;
+        let result =
+            refresh_access_token(&http, &mock_server.uri(), &refresh_token, "my_client_id").await;
 
         // If the mock matched, the request had correct params
         assert!(result.is_ok());
@@ -332,13 +315,8 @@ mod wiremock_tests {
         let http = reqwest::Client::new();
         let refresh_token = SecretString::from("token".to_string());
 
-        let result = refresh_access_token(
-            &http,
-            &mock_server.uri(),
-            &refresh_token,
-            "client_id",
-        )
-        .await;
+        let result =
+            refresh_access_token(&http, &mock_server.uri(), &refresh_token, "client_id").await;
 
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -360,13 +338,8 @@ mod wiremock_tests {
         let http = reqwest::Client::new();
         let refresh_token = SecretString::from("token".to_string());
 
-        let result = refresh_access_token(
-            &http,
-            &mock_server.uri(),
-            &refresh_token,
-            "client_id",
-        )
-        .await;
+        let result =
+            refresh_access_token(&http, &mock_server.uri(), &refresh_token, "client_id").await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(AppError::OAuthError(_))));

@@ -254,9 +254,9 @@ impl BulkQueryV2Client {
         }
 
         // Create/truncate temp file
-        let mut file = File::create(&temp_path).await.map_err(|e| {
-            AppError::Internal(format!("Failed to create temp file: {}", e))
-        })?;
+        let mut file = File::create(&temp_path)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to create temp file: {}", e)))?;
 
         // Download with pagination
         let mut locator: Option<String> = None;
@@ -284,15 +284,17 @@ impl BulkQueryV2Client {
         }
 
         // Flush and close the file
-        file.flush().await.map_err(|e| {
-            AppError::Internal(format!("Failed to flush output file: {}", e))
-        })?;
+        file.flush()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to flush output file: {}", e)))?;
         drop(file);
 
         // Atomic rename to final path
-        tokio::fs::rename(&temp_path, output_path).await.map_err(|e| {
-            AppError::Internal(format!("Failed to rename temp file to final path: {}", e))
-        })?;
+        tokio::fs::rename(&temp_path, output_path)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to rename temp file to final path: {}", e))
+            })?;
 
         info!(
             "[BULK] Download complete for job {}: {:?}",
@@ -318,7 +320,11 @@ impl BulkQueryV2Client {
         info!(
             "[BULK] GET /jobs/query/{}/results{}",
             redact_id(job_id),
-            if locator.is_some() { " (paginated)" } else { "" }
+            if locator.is_some() {
+                " (paginated)"
+            } else {
+                ""
+            }
         );
 
         let response = self
@@ -327,9 +333,7 @@ impl BulkQueryV2Client {
             .bearer_auth(&self.access_token)
             .send()
             .await
-            .map_err(|e| {
-                AppError::ConnectionFailed(format!("Results download failed: {}", e))
-            })?;
+            .map_err(|e| AppError::ConnectionFailed(format!("Results download failed: {}", e)))?;
 
         let status = response.status();
         info!(
@@ -370,9 +374,9 @@ impl BulkQueryV2Client {
             let chunk = chunk_result.map_err(|e| {
                 AppError::ConnectionFailed(format!("Error reading response stream: {}", e))
             })?;
-            file.write_all(&chunk).await.map_err(|e| {
-                AppError::Internal(format!("Error writing to file: {}", e))
-            })?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| AppError::Internal(format!("Error writing to file: {}", e)))?;
             total_bytes += chunk.len();
         }
 
@@ -397,9 +401,9 @@ impl BulkQueryV2Client {
 
             if header_skipped {
                 // Header already skipped, write directly
-                file.write_all(&chunk).await.map_err(|e| {
-                    AppError::Internal(format!("Error writing to file: {}", e))
-                })?;
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|e| AppError::Internal(format!("Error writing to file: {}", e)))?;
                 total_bytes += chunk.len();
             } else {
                 // Accumulate bytes until we find the first newline
@@ -425,9 +429,9 @@ impl BulkQueryV2Client {
         // (edge case: single line without newline)
         if !header_skipped && !pending_bytes.is_empty() {
             // This shouldn't happen for CSV with multiple rows, but handle gracefully
-            file.write_all(&pending_bytes).await.map_err(|e| {
-                AppError::Internal(format!("Error writing to file: {}", e))
-            })?;
+            file.write_all(&pending_bytes)
+                .await
+                .map_err(|e| AppError::Internal(format!("Error writing to file: {}", e)))?;
             total_bytes += pending_bytes.len();
         }
 
@@ -480,17 +484,17 @@ impl BulkQueryV2Client {
     /// Builds the base jobs URL: /services/data/vXX.X/jobs/query
     fn build_jobs_url(&self) -> Result<Url, AppError> {
         let path = format!("/services/data/{}/jobs/query", API_VERSION);
-        self.base_url.join(&path).map_err(|e| {
-            AppError::Internal(format!("Failed to build jobs URL: {}", e))
-        })
+        self.base_url
+            .join(&path)
+            .map_err(|e| AppError::Internal(format!("Failed to build jobs URL: {}", e)))
     }
 
     /// Builds a specific job URL: /services/data/vXX.X/jobs/query/{job_id}
     fn build_job_url(&self, job_id: &str) -> Result<Url, AppError> {
         let path = format!("/services/data/{}/jobs/query/{}", API_VERSION, job_id);
-        self.base_url.join(&path).map_err(|e| {
-            AppError::Internal(format!("Failed to build job URL: {}", e))
-        })
+        self.base_url
+            .join(&path)
+            .map_err(|e| AppError::Internal(format!("Failed to build job URL: {}", e)))
     }
 
     /// Builds the results URL with optional locator for pagination.
@@ -499,9 +503,10 @@ impl BulkQueryV2Client {
             "/services/data/{}/jobs/query/{}/results",
             API_VERSION, job_id
         );
-        let mut url = self.base_url.join(&path).map_err(|e| {
-            AppError::Internal(format!("Failed to build results URL: {}", e))
-        })?;
+        let mut url = self
+            .base_url
+            .join(&path)
+            .map_err(|e| AppError::Internal(format!("Failed to build results URL: {}", e)))?;
 
         if let Some(loc) = locator {
             url.query_pairs_mut().append_pair("locator", loc);
@@ -956,9 +961,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path(format!("/services/data/{}/jobs/query", API_VERSION)))
-            .respond_with(
-                ResponseTemplate::new(429).insert_header("Retry-After", "60"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
             .mount(&mock_server)
             .await;
 

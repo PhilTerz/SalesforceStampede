@@ -151,6 +151,11 @@ impl BulkIngestV2Client {
         }
     }
 
+    /// Returns the base URL for this client.
+    pub fn base_url(&self) -> &Url {
+        &self.base_url
+    }
+
     /// Creates a new bulk ingest job.
     ///
     /// # Arguments
@@ -170,9 +175,8 @@ impl BulkIngestV2Client {
         let url = self.build_jobs_url()?;
 
         // Build request body - merge with contentType: "CSV"
-        let mut body = serde_json::to_value(&req).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize job request: {}", e))
-        })?;
+        let mut body = serde_json::to_value(&req)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize job request: {}", e)))?;
         body.as_object_mut()
             .ok_or_else(|| AppError::Internal("Expected object in JSON".to_string()))?
             .insert("contentType".to_string(), serde_json::json!("CSV"));
@@ -190,7 +194,9 @@ impl BulkIngestV2Client {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AppError::ConnectionFailed(format!("Ingest job creation failed: {}", e)))?;
+            .map_err(|e| {
+                AppError::ConnectionFailed(format!("Ingest job creation failed: {}", e))
+            })?;
 
         let status = response.status();
         info!("[BULK-INGEST] POST /jobs/ingest -> {}", status.as_u16());
@@ -225,14 +231,15 @@ impl BulkIngestV2Client {
         let url = self.build_batches_url(job_id)?;
 
         // Open file for streaming
-        let file = tokio::fs::File::open(csv_path).await.map_err(|e| {
-            AppError::Internal(format!("Failed to open CSV file: {}", e))
-        })?;
+        let file = tokio::fs::File::open(csv_path)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to open CSV file: {}", e)))?;
 
         // Get file size for logging (optional, but helpful)
-        let metadata = file.metadata().await.map_err(|e| {
-            AppError::Internal(format!("Failed to get file metadata: {}", e))
-        })?;
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to get file metadata: {}", e)))?;
         let file_size = metadata.len();
 
         // Create a stream from the file
@@ -511,17 +518,14 @@ impl BulkIngestV2Client {
         }
 
         // Create temp file in the same directory for atomic rename
-        let parent_dir = output_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
-        let temp_file = tempfile::NamedTempFile::new_in(parent_dir).map_err(|e| {
-            AppError::Internal(format!("Failed to create temp file: {}", e))
-        })?;
+        let parent_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
+        let temp_file = tempfile::NamedTempFile::new_in(parent_dir)
+            .map_err(|e| AppError::Internal(format!("Failed to create temp file: {}", e)))?;
 
         // Convert to tokio file for async writing
-        let std_file = temp_file.reopen().map_err(|e| {
-            AppError::Internal(format!("Failed to reopen temp file: {}", e))
-        })?;
+        let std_file = temp_file
+            .reopen()
+            .map_err(|e| AppError::Internal(format!("Failed to reopen temp file: {}", e)))?;
         let mut async_file = File::from_std(std_file);
 
         // Stream response body to file
@@ -532,24 +536,27 @@ impl BulkIngestV2Client {
             let chunk = chunk_result.map_err(|e| {
                 AppError::ConnectionFailed(format!("Error reading response stream: {}", e))
             })?;
-            async_file.write_all(&chunk).await.map_err(|e| {
-                AppError::Internal(format!("Error writing to file: {}", e))
-            })?;
+            async_file
+                .write_all(&chunk)
+                .await
+                .map_err(|e| AppError::Internal(format!("Error writing to file: {}", e)))?;
             total_bytes += chunk.len();
         }
 
         // Flush and sync
-        async_file.flush().await.map_err(|e| {
-            AppError::Internal(format!("Failed to flush output file: {}", e))
-        })?;
-        async_file.sync_all().await.map_err(|e| {
-            AppError::Internal(format!("Failed to sync output file: {}", e))
-        })?;
+        async_file
+            .flush()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to flush output file: {}", e)))?;
+        async_file
+            .sync_all()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to sync output file: {}", e)))?;
 
         // Atomic rename via persist
-        temp_file.persist(output_path).map_err(|e| {
-            AppError::Internal(format!("Failed to persist temp file: {}", e))
-        })?;
+        temp_file
+            .persist(output_path)
+            .map_err(|e| AppError::Internal(format!("Failed to persist temp file: {}", e)))?;
 
         info!(
             "[BULK-INGEST] {} download complete for job {}: {} bytes",
@@ -568,17 +575,17 @@ impl BulkIngestV2Client {
     /// Builds the base jobs URL: /services/data/vXX.X/jobs/ingest
     fn build_jobs_url(&self) -> Result<Url, AppError> {
         let path = format!("/services/data/{}/jobs/ingest", API_VERSION);
-        self.base_url.join(&path).map_err(|e| {
-            AppError::Internal(format!("Failed to build jobs URL: {}", e))
-        })
+        self.base_url
+            .join(&path)
+            .map_err(|e| AppError::Internal(format!("Failed to build jobs URL: {}", e)))
     }
 
     /// Builds a specific job URL: /services/data/vXX.X/jobs/ingest/{job_id}
     fn build_job_url(&self, job_id: &str) -> Result<Url, AppError> {
         let path = format!("/services/data/{}/jobs/ingest/{}", API_VERSION, job_id);
-        self.base_url.join(&path).map_err(|e| {
-            AppError::Internal(format!("Failed to build job URL: {}", e))
-        })
+        self.base_url
+            .join(&path)
+            .map_err(|e| AppError::Internal(format!("Failed to build job URL: {}", e)))
     }
 
     /// Builds the batches URL: /services/data/vXX.X/jobs/ingest/{job_id}/batches
@@ -587,9 +594,9 @@ impl BulkIngestV2Client {
             "/services/data/{}/jobs/ingest/{}/batches",
             API_VERSION, job_id
         );
-        self.base_url.join(&path).map_err(|e| {
-            AppError::Internal(format!("Failed to build batches URL: {}", e))
-        })
+        self.base_url
+            .join(&path)
+            .map_err(|e| AppError::Internal(format!("Failed to build batches URL: {}", e)))
     }
 
     /// Builds the results URL: /services/data/vXX.X/jobs/ingest/{job_id}/{result_type}
@@ -598,9 +605,9 @@ impl BulkIngestV2Client {
             "/services/data/{}/jobs/ingest/{}/{}",
             API_VERSION, job_id, result_type
         );
-        self.base_url.join(&path).map_err(|e| {
-            AppError::Internal(format!("Failed to build results URL: {}", e))
-        })
+        self.base_url
+            .join(&path)
+            .map_err(|e| AppError::Internal(format!("Failed to build results URL: {}", e)))
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -875,9 +882,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let result = client
-            .upload_job_data("750xx000000001ABC", &csv_path)
-            .await;
+        let result = client.upload_job_data("750xx000000001ABC", &csv_path).await;
 
         assert!(result.is_ok());
     }

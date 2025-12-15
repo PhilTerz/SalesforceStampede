@@ -87,7 +87,10 @@ impl std::fmt::Debug for OrgCredentials {
             .field("username", &self.username)
             .field("instance_url", &self.instance_url)
             .field("access_token", &"[REDACTED]")
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("api_version", &self.api_version)
             .finish()
     }
@@ -277,13 +280,11 @@ impl SalesforceClient {
             return Err(AppError::NotAuthenticated);
         }
 
-        let base = Url::parse(&creds.instance_url).map_err(|_| {
-            AppError::Internal("Invalid instance URL".to_string())
-        })?;
+        let base = Url::parse(&creds.instance_url)
+            .map_err(|_| AppError::Internal("Invalid instance URL".to_string()))?;
 
-        base.join(path).map_err(|_| {
-            AppError::Internal(format!("Invalid path: {}", path))
-        })
+        base.join(path)
+            .map_err(|_| AppError::Internal(format!("Invalid path: {}", path)))
     }
 
     /// Executes an authenticated request with automatic token refresh.
@@ -319,13 +320,12 @@ impl SalesforceClient {
                 return Err(AppError::NotAuthenticated);
             }
 
-            let base = Url::parse(&creds.instance_url).map_err(|_| {
-                AppError::Internal("Invalid instance URL".to_string())
-            })?;
+            let base = Url::parse(&creds.instance_url)
+                .map_err(|_| AppError::Internal("Invalid instance URL".to_string()))?;
 
-            let url = base.join(path).map_err(|_| {
-                AppError::Internal(format!("Invalid path: {}", path))
-            })?;
+            let url = base
+                .join(path)
+                .map_err(|_| AppError::Internal(format!("Invalid path: {}", path)))?;
 
             let token = creds.access_token.expose_secret().to_string();
             (url, token)
@@ -366,13 +366,12 @@ impl SalesforceClient {
             let creds = self.creds.read().await;
 
             // Instance URL might have changed after refresh
-            let base = Url::parse(&creds.instance_url).map_err(|_| {
-                AppError::Internal("Invalid instance URL".to_string())
-            })?;
+            let base = Url::parse(&creds.instance_url)
+                .map_err(|_| AppError::Internal("Invalid instance URL".to_string()))?;
 
-            let url = base.join(path).map_err(|_| {
-                AppError::Internal(format!("Invalid path: {}", path))
-            })?;
+            let url = base
+                .join(path)
+                .map_err(|_| AppError::Internal(format!("Invalid path: {}", path)))?;
 
             let token = creds.access_token.expose_secret().to_string();
             (url, token)
@@ -464,13 +463,9 @@ impl SalesforceClient {
         let login_url = refresh::get_login_url_for_refresh(&instance_url);
 
         // Perform the refresh
-        let token_response = refresh::refresh_access_token(
-            &self.http,
-            &login_url,
-            &refresh_token,
-            CLIENT_ID,
-        )
-        .await?;
+        let token_response =
+            refresh::refresh_access_token(&self.http, &login_url, &refresh_token, CLIENT_ID)
+                .await?;
 
         // Update credentials
         {
@@ -480,12 +475,7 @@ impl SalesforceClient {
         }
 
         // Update keychain with new access token
-        keychain::store_tokens(
-            &org_id,
-            &token_response.access_token,
-            &refresh_token_str,
-        )
-        .await?;
+        keychain::store_tokens(&org_id, &token_response.access_token, &refresh_token_str).await?;
 
         info!("[SFDC] Token refresh complete, credentials updated");
         Ok(())
@@ -534,10 +524,7 @@ impl SalesforceClient {
             Err(_) => {
                 // Log failed request without exposing the actual error
                 // (which may contain the full URL with tokens)
-                info!(
-                    "[SFDC] GET {} FAILED {}ms",
-                    sanitized_url, duration_ms
-                );
+                info!("[SFDC] GET {} FAILED {}ms", sanitized_url, duration_ms);
 
                 // Return a sanitized error message - never expose the raw reqwest error
                 Err(AppError::ConnectionFailed(
@@ -551,10 +538,7 @@ impl SalesforceClient {
 /// Builds the configured HTTP client.
 fn build_http_client() -> Result<reqwest::Client, AppError> {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static(CLIENT_USER_AGENT),
-    );
+    headers.insert(USER_AGENT, HeaderValue::from_static(CLIENT_USER_AGENT));
 
     reqwest::Client::builder()
         .default_headers(headers)
@@ -588,8 +572,7 @@ mod tests {
 
     #[test]
     fn sanitize_strips_fragment() {
-        let url =
-            Url::parse("https://example.com/path?safe=value#secret-anchor").unwrap();
+        let url = Url::parse("https://example.com/path?safe=value#secret-anchor").unwrap();
 
         // PathOnly mode
         let result = sanitize_url_for_logs(&url, LoggingMode::PathOnly);
@@ -606,10 +589,9 @@ mod tests {
 
     #[test]
     fn path_only_excludes_query_string() {
-        let url = Url::parse(
-            "https://login.salesforce.com/services/oauth2/token?code=secret&state=abc",
-        )
-        .unwrap();
+        let url =
+            Url::parse("https://login.salesforce.com/services/oauth2/token?code=secret&state=abc")
+                .unwrap();
 
         let result = sanitize_url_for_logs(&url, LoggingMode::PathOnly);
 
@@ -639,7 +621,7 @@ mod tests {
         // Test all sensitive parameters from the deny list
         let test_cases = [
             ("access_token", "abc123"),
-            ("Access_Token", "xyz789"), // Case variation
+            ("Access_Token", "xyz789"),   // Case variation
             ("ACCESS_TOKEN", "TOKEN123"), // Uppercase
             ("refresh_token", "refresh123"),
             ("client_secret", "secret456"),
@@ -717,10 +699,9 @@ mod tests {
 
     #[test]
     fn sanitize_handles_deep_paths() {
-        let url = Url::parse(
-            "https://na1.salesforce.com/services/data/v60.0/sobjects/Account/describe",
-        )
-        .unwrap();
+        let url =
+            Url::parse("https://na1.salesforce.com/services/data/v60.0/sobjects/Account/describe")
+                .unwrap();
 
         let result = sanitize_url_for_logs(&url, LoggingMode::PathOnly);
 
@@ -953,7 +934,10 @@ mod tests {
 
         assert!(result.is_ok());
         let url = result.unwrap();
-        assert_eq!(url.as_str(), "https://na1.salesforce.com/services/data/v60.0/query");
+        assert_eq!(
+            url.as_str(),
+            "https://na1.salesforce.com/services/data/v60.0/query"
+        );
     }
 
     #[tokio::test]
@@ -969,7 +953,9 @@ mod tests {
         };
         let client = SalesforceClient::new(creds).unwrap();
 
-        let result = client.build_url("/services/data/v60.0/query?q=SELECT+Id").await;
+        let result = client
+            .build_url("/services/data/v60.0/query?q=SELECT+Id")
+            .await;
 
         assert!(result.is_ok());
         let url = result.unwrap();

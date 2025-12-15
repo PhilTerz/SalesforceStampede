@@ -264,12 +264,19 @@ mod tests {
             },
             // API
             AppError::SalesforceError("test sf error".into()),
-            AppError::RateLimited { retry_after_secs: Some(30) },
-            AppError::RateLimited { retry_after_secs: None },
+            AppError::RateLimited {
+                retry_after_secs: Some(30),
+            },
+            AppError::RateLimited {
+                retry_after_secs: None,
+            },
             AppError::ConcurrentLimitExceeded,
             AppError::CountTimeout,
             // Bulk
-            AppError::JobFailed { job_id: "750xx000000001".into(), message: "test failure".into() },
+            AppError::JobFailed {
+                job_id: "750xx000000001".into(),
+                message: "test failure".into(),
+            },
             AppError::Cancelled,
             // File/CSV
             AppError::NotUtf8,
@@ -307,8 +314,12 @@ mod tests {
         let actionable = vec![
             AppError::NotAuthenticated,
             AppError::SessionExpired,
-            AppError::RateLimited { retry_after_secs: Some(60) },
-            AppError::RateLimited { retry_after_secs: None },
+            AppError::RateLimited {
+                retry_after_secs: Some(60),
+            },
+            AppError::RateLimited {
+                retry_after_secs: None,
+            },
             AppError::ConnectionFailed("network error".into()),
         ];
 
@@ -320,11 +331,7 @@ mod tests {
                 variant
             );
             let action = presentation.action.unwrap();
-            assert!(
-                !action.trim().is_empty(),
-                "Empty action for {:?}",
-                variant
-            );
+            assert!(!action.trim().is_empty(), "Empty action for {:?}", variant);
         }
     }
 
@@ -347,7 +354,10 @@ mod tests {
 
     #[test]
     fn rate_limited_suggests_wait_retry() {
-        let presentation = AppError::RateLimited { retry_after_secs: Some(30) }.to_presentation();
+        let presentation = AppError::RateLimited {
+            retry_after_secs: Some(30),
+        }
+        .to_presentation();
         let action = presentation.action.expect("RateLimited should have action");
         let action_lower = action.to_lowercase();
         assert!(
@@ -365,7 +375,9 @@ mod tests {
     #[test]
     fn connection_failed_suggests_check_network() {
         let presentation = AppError::ConnectionFailed("timeout".into()).to_presentation();
-        let action = presentation.action.expect("ConnectionFailed should have action");
+        let action = presentation
+            .action
+            .expect("ConnectionFailed should have action");
         let action_lower = action.to_lowercase();
         assert!(
             action_lower.contains("network") || action_lower.contains("retry"),
@@ -407,14 +419,29 @@ mod tests {
     fn no_secret_leakage_in_presentation() {
         // Test cases: (variant label, error with sensitive payload)
         let test_cases: Vec<(&str, AppError)> = vec![
-            ("OAuthError", AppError::OAuthError("Bearer abc123 refresh_token=secret".into())),
-            ("SalesforceError", AppError::SalesforceError("AUTHORIZATION: Bearer token".into())),
-            ("ConnectionFailed", AppError::ConnectionFailed("access_token=xyz client_secret=abc".into())),
-            ("Internal", AppError::Internal("refresh_token leaked".into())),
-            ("JobFailed", AppError::JobFailed {
-                job_id: "750xx".into(),
-                message: "Bearer token invalid".into(),
-            }),
+            (
+                "OAuthError",
+                AppError::OAuthError("Bearer abc123 refresh_token=secret".into()),
+            ),
+            (
+                "SalesforceError",
+                AppError::SalesforceError("AUTHORIZATION: Bearer token".into()),
+            ),
+            (
+                "ConnectionFailed",
+                AppError::ConnectionFailed("access_token=xyz client_secret=abc".into()),
+            ),
+            (
+                "Internal",
+                AppError::Internal("refresh_token leaked".into()),
+            ),
+            (
+                "JobFailed",
+                AppError::JobFailed {
+                    job_id: "750xx".into(),
+                    message: "Bearer token invalid".into(),
+                },
+            ),
         ];
 
         for (label, variant) in test_cases {
@@ -424,7 +451,8 @@ mod tests {
                 presentation.title,
                 presentation.message,
                 presentation.action.as_deref().unwrap_or("")
-            ).to_ascii_lowercase();
+            )
+            .to_ascii_lowercase();
 
             // Reuse production patterns for consistency
             for pattern in SENSITIVE_PATTERNS {

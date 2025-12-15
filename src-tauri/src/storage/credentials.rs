@@ -242,9 +242,7 @@ mod tests {
             .expect("Failed to store tokens");
 
         // Retrieve tokens
-        let retrieved = get_tokens(test_org_id)
-            .await
-            .expect("Failed to get tokens");
+        let retrieved = get_tokens(test_org_id).await.expect("Failed to get tokens");
 
         assert_eq!(retrieved.access_token, access);
         assert_eq!(retrieved.refresh_token, refresh);

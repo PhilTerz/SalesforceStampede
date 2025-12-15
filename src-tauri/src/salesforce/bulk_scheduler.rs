@@ -193,26 +193,34 @@ mod tests {
         let scheduler_clone = scheduler.clone();
 
         // Spawn a task that attempts to acquire
-        let handle = tokio::spawn(async move {
-            scheduler_clone.acquire().await
-        });
+        let handle = tokio::spawn(async move { scheduler_clone.acquire().await });
 
         // The task should NOT complete within 50ms (blocked waiting for slot)
-        let result = timeout(Duration::from_millis(50), &mut Box::pin(async {
-            // We need to check if handle is done, not await it
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        })).await;
+        let result = timeout(
+            Duration::from_millis(50),
+            &mut Box::pin(async {
+                // We need to check if handle is done, not await it
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }),
+        )
+        .await;
         assert!(result.is_ok(), "Timeout should not trigger for our sleep");
 
         // Verify the spawned task is still pending (hasn't completed)
-        assert!(!handle.is_finished(), "Acquire task should still be blocked");
+        assert!(
+            !handle.is_finished(),
+            "Acquire task should still be blocked"
+        );
 
         // Drop the first permit to release the slot
         drop(permit1);
 
         // Now the task should complete
         let result = timeout(Duration::from_millis(100), handle).await;
-        assert!(result.is_ok(), "Acquire should complete after slot is freed");
+        assert!(
+            result.is_ok(),
+            "Acquire should complete after slot is freed"
+        );
 
         let permit2 = result.unwrap().expect("Task should not panic");
         assert_eq!(permit2.active_jobs(), 1);
@@ -295,13 +303,9 @@ mod tests {
         let scheduler2 = scheduler.clone();
 
         // Spawn two waiting tasks
-        let handle1 = tokio::spawn(async move {
-            scheduler1.acquire().await
-        });
+        let handle1 = tokio::spawn(async move { scheduler1.acquire().await });
 
-        let handle2 = tokio::spawn(async move {
-            scheduler2.acquire().await
-        });
+        let handle2 = tokio::spawn(async move { scheduler2.acquire().await });
 
         // Give tasks time to start waiting
         tokio::time::sleep(Duration::from_millis(10)).await;

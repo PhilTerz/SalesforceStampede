@@ -510,7 +510,15 @@ pub async fn cleanup_old_jobs(db: &Database, retention_days: i64) -> Result<u64,
                 .map_err(|e| AppError::Internal(format!("Failed to prepare query: {e}")))?;
 
             let rows = stmt
-                .query_map(rusqlite::params![terminal_states[0], terminal_states[1], terminal_states[2], cutoff], |row| row.get(0))
+                .query_map(
+                    rusqlite::params![
+                        terminal_states[0],
+                        terminal_states[1],
+                        terminal_states[2],
+                        cutoff
+                    ],
+                    |row| row.get(0),
+                )
                 .map_err(|e| AppError::Internal(format!("Failed to query old groups: {e}")))?;
 
             rows.collect::<Result<Vec<_>, _>>()
@@ -521,11 +529,8 @@ pub async fn cleanup_old_jobs(db: &Database, retention_days: i64) -> Result<u64,
 
         // Delete jobs for each group
         for group_id in &group_ids {
-            tx.execute(
-                "DELETE FROM bulk_jobs WHERE group_id = ?1",
-                [group_id],
-            )
-            .map_err(|e| AppError::Internal(format!("Failed to delete jobs: {e}")))?;
+            tx.execute("DELETE FROM bulk_jobs WHERE group_id = ?1", [group_id])
+                .map_err(|e| AppError::Internal(format!("Failed to delete jobs: {e}")))?;
         }
 
         // Delete the groups
@@ -604,11 +609,7 @@ pub async fn reconcile_jobs<P: JobStatusProvider>(
                 }
                 Err(e) => {
                     // Other errors - log and continue (don't fail entire reconciliation)
-                    tracing::warn!(
-                        "Failed to get status for job {}: {:?}",
-                        job.job_id,
-                        e
-                    );
+                    tracing::warn!("Failed to get status for job {}: {:?}", job.job_id, e);
                 }
             }
         }
@@ -623,10 +624,7 @@ pub async fn reconcile_jobs<P: JobStatusProvider>(
 }
 
 /// Helper to get non-terminal jobs for an org.
-async fn get_non_terminal_jobs(
-    db: &Database,
-    org_id: &str,
-) -> Result<Vec<BulkJobRow>, AppError> {
+async fn get_non_terminal_jobs(db: &Database, org_id: &str) -> Result<Vec<BulkJobRow>, AppError> {
     let db_path = db.db_path().clone();
     let org_id = org_id.to_string();
 
@@ -836,10 +834,16 @@ mod tests {
         fn add_response(&self, job_id: &str, response: Result<BulkIngestJobInfo, AppError>) {
             match response {
                 Ok(info) => {
-                    self.responses.lock().unwrap().insert(job_id.to_string(), info);
+                    self.responses
+                        .lock()
+                        .unwrap()
+                        .insert(job_id.to_string(), info);
                 }
                 Err(e) => {
-                    self.errors.lock().unwrap().insert(job_id.to_string(), format!("{:?}", e));
+                    self.errors
+                        .lock()
+                        .unwrap()
+                        .insert(job_id.to_string(), format!("{:?}", e));
                 }
             }
         }
@@ -919,11 +923,17 @@ mod tests {
             updated_at: timestamp,
         };
 
-        add_job_to_group(&db, &job1).await.expect("Failed to add job 1");
-        add_job_to_group(&db, &job2).await.expect("Failed to add job 2");
+        add_job_to_group(&db, &job1)
+            .await
+            .expect("Failed to add job 1");
+        add_job_to_group(&db, &job2)
+            .await
+            .expect("Failed to add job 2");
 
         // Retrieve and verify
-        let result = get_group(&db, "group-123").await.expect("Failed to get group");
+        let result = get_group(&db, "group-123")
+            .await
+            .expect("Failed to get group");
 
         assert_eq!(result.group.group_id, "group-123");
         assert_eq!(result.group.object, "Account");
@@ -966,7 +976,9 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
         };
-        add_job_to_group(&db, &job).await.expect("Failed to add job");
+        add_job_to_group(&db, &job)
+            .await
+            .expect("Failed to add job");
 
         // Update job state
         update_job_state(
@@ -981,7 +993,9 @@ mod tests {
         .expect("Failed to update job state");
 
         // Verify
-        let result = get_group(&db, "group-1").await.expect("Failed to get group");
+        let result = get_group(&db, "group-1")
+            .await
+            .expect("Failed to get group");
         let updated_job = &result.jobs[0];
 
         assert_eq!(updated_job.state, BulkJobState::JobComplete);

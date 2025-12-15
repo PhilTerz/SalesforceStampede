@@ -145,7 +145,8 @@ impl RestQueryClient {
         soql: &str,
         max_rows: u64,
     ) -> Result<QueryResult, AppError> {
-        self.query_internal(soql, Some(max_rows), None::<fn(u64)>).await
+        self.query_internal(soql, Some(max_rows), None::<fn(u64)>)
+            .await
     }
 
     /// Executes a SOQL query with an optional progress callback and row limit.
@@ -211,10 +212,9 @@ impl RestQueryClient {
             let response = self.execute_query_request(&url).await?;
 
             // Parse the response
-            let wire_response: WireQueryResponse = response
-                .json()
-                .await
-                .map_err(|e| AppError::Internal(format!("Failed to parse query response: {}", e)))?;
+            let wire_response: WireQueryResponse = response.json().await.map_err(|e| {
+                AppError::Internal(format!("Failed to parse query response: {}", e))
+            })?;
 
             // Store total_size from first page
             if page_count == 1 {

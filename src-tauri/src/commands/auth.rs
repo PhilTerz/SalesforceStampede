@@ -121,9 +121,11 @@ pub async fn list_orgs(state: State<'_, AppState>) -> Result<Vec<OrgInfo>, AppEr
 #[tauri::command]
 pub async fn switch_org(state: State<'_, AppState>, org_id: String) -> Result<OrgInfo, AppError> {
     // Verify the org exists
-    let org = state.db.get_org(&org_id).await?.ok_or_else(|| {
-        AppError::NotFound(format!("Org not found: {}", org_id))
-    })?;
+    let org = state
+        .db
+        .get_org(&org_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Org not found: {}", org_id)))?;
 
     // Set as active
     state.set_active_org_id(Some(org_id.clone())).await;

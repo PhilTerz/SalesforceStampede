@@ -17,12 +17,12 @@ use tracing::info;
 use url::Url;
 
 use crate::error::AppError;
+use crate::salesforce::bulk_query_v2::BulkQueryV2Client;
 use crate::salesforce::client::{OrgCredentials, SalesforceClient};
 use crate::salesforce::query_strategy::{
     count_query, determine_strategy, QueryPreferences, QueryStrategy, StrategyDecision,
 };
 use crate::salesforce::rest::RestQueryClient;
-use crate::salesforce::bulk_query_v2::BulkQueryV2Client;
 use crate::salesforce::BulkJobState;
 use crate::salesforce::API_VERSION;
 use crate::state::AppState;
@@ -97,10 +97,14 @@ async fn get_bulk_client(state: &AppState) -> Result<BulkQueryV2Client, AppError
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| AppError::Internal(format!("Failed to create HTTP client: {}", e)))?
+            .map_err(|e| AppError::Internal(format!("Failed to create HTTP client: {}", e)))?,
     );
 
-    Ok(BulkQueryV2Client::new(http_client, base_url, tokens.access_token))
+    Ok(BulkQueryV2Client::new(
+        http_client,
+        base_url,
+        tokens.access_token,
+    ))
 }
 
 /// Returns the active org ID or errors.
@@ -244,15 +248,21 @@ pub async fn execute_query(
     let org_id = require_active_org(&state).await?;
     let client = get_active_client(&state).await?;
 
-    info!("[Query] Executing query with strategy: {}", request.strategy);
+    info!(
+        "[Query] Executing query with strategy: {}",
+        request.strategy
+    );
 
     // Emit initial progress
-    let _ = app_handle.emit("query:progress", QueryProgressEvent {
-        records_fetched: 0,
-        total_expected: None,
-        phase: "starting".to_string(),
-        job_state: None,
-    });
+    let _ = app_handle.emit(
+        "query:progress",
+        QueryProgressEvent {
+            records_fetched: 0,
+            total_expected: None,
+            phase: "starting".to_string(),
+            job_state: None,
+        },
+    );
 
     // Determine strategy
     let chosen_strategy = match request.strategy.to_lowercase().as_str() {
@@ -260,12 +270,15 @@ pub async fn execute_query(
         "bulk" => QueryStrategy::Bulk,
         _ => {
             // Auto: determine based on count
-            let _ = app_handle.emit("query:progress", QueryProgressEvent {
-                records_fetched: 0,
-                total_expected: None,
-                phase: "counting".to_string(),
-                job_state: None,
-            });
+            let _ = app_handle.emit(
+                "query:progress",
+                QueryProgressEvent {
+                    records_fetched: 0,
+                    total_expected: None,
+                    phase: "counting".to_string(),
+                    job_state: None,
+                },
+            );
 
             let rest_client = RestQueryClient::new(client.clone());
             let prefs = QueryPreferences::default();
@@ -287,12 +300,8 @@ pub async fn execute_query(
     };
 
     let result = match chosen_strategy {
-        QueryStrategy::Rest => {
-            execute_rest_query(&client, &app_handle, &request).await?
-        }
-        QueryStrategy::Bulk => {
-            execute_bulk_query(&state, &app_handle, &request).await?
-        }
+        QueryStrategy::Rest => execute_rest_query(&client, &app_handle, &request).await?,
+        QueryStrategy::Bulk => execute_bulk_query(&state, &app_handle, &request).await?,
         QueryStrategy::Auto => {
             // This shouldn't happen since Auto is handled above
             execute_rest_query(&client, &app_handle, &request).await?
@@ -317,12 +326,15 @@ pub async fn execute_query(
     let _ = state.db.insert_query_history(history_entry).await;
 
     // Emit completion
-    let _ = app_handle.emit("query:progress", QueryProgressEvent {
-        records_fetched: result.records.len() as u64,
-        total_expected: Some(result.total_size),
-        phase: "complete".to_string(),
-        job_state: None,
-    });
+    let _ = app_handle.emit(
+        "query:progress",
+        QueryProgressEvent {
+            records_fetched: result.records.len() as u64,
+            total_expected: Some(result.total_size),
+            phase: "complete".to_string(),
+            job_state: None,
+        },
+    );
 
     Ok(ExecuteQueryResult {
         duration_ms,
@@ -347,12 +359,15 @@ async fn execute_rest_query(
             &request.soql,
             request.max_rows,
             Some(move |count| {
-                let _ = app.emit("query:progress", QueryProgressEvent {
-                    records_fetched: count,
-                    total_expected: None,
-                    phase: "fetching".to_string(),
-                    job_state: None,
-                });
+                let _ = app.emit(
+                    "query:progress",
+                    QueryProgressEvent {
+                        records_fetched: count,
+                        total_expected: None,
+                        phase: "fetching".to_string(),
+                        job_state: None,
+                    },
+                );
             }),
         )
         .await?;
@@ -379,12 +394,15 @@ async fn execute_bulk_query(
     let bulk_client = get_bulk_client(state).await?;
 
     // Emit job creation phase
-    let _ = app_handle.emit("query:progress", QueryProgressEvent {
-        records_fetched: 0,
-        total_expected: None,
-        phase: "creating_job".to_string(),
-        job_state: Some("UploadComplete".to_string()),
-    });
+    let _ = app_handle.emit(
+        "query:progress",
+        QueryProgressEvent {
+            records_fetched: 0,
+            total_expected: None,
+            phase: "creating_job".to_string(),
+            job_state: Some("UploadComplete".to_string()),
+        },
+    );
 
     // Create the bulk query job (returns job ID as String)
     let job_id = bulk_client.create_query_job(&request.soql).await?;
@@ -401,16 +419,22 @@ async fn execute_bulk_query(
         let status = bulk_client.get_query_job_status(&job_id).await?;
 
         // Emit progress
-        let _ = app_handle.emit("query:progress", QueryProgressEvent {
-            records_fetched: status.number_records_processed.unwrap_or(0),
-            total_expected: None,
-            phase: "polling".to_string(),
-            job_state: Some(format!("{:?}", status.state)),
-        });
+        let _ = app_handle.emit(
+            "query:progress",
+            QueryProgressEvent {
+                records_fetched: status.number_records_processed.unwrap_or(0),
+                total_expected: None,
+                phase: "polling".to_string(),
+                job_state: Some(format!("{:?}", status.state)),
+            },
+        );
 
         match status.state {
             BulkJobState::JobComplete => {
-                info!("[Query] Bulk job complete: {} records", status.number_records_processed.unwrap_or(0));
+                info!(
+                    "[Query] Bulk job complete: {} records",
+                    status.number_records_processed.unwrap_or(0)
+                );
                 break;
             }
             BulkJobState::Failed | BulkJobState::Aborted => {
@@ -427,12 +451,15 @@ async fn execute_bulk_query(
     }
 
     // Download results
-    let _ = app_handle.emit("query:progress", QueryProgressEvent {
-        records_fetched: 0,
-        total_expected: None,
-        phase: "downloading".to_string(),
-        job_state: Some("JobComplete".to_string()),
-    });
+    let _ = app_handle.emit(
+        "query:progress",
+        QueryProgressEvent {
+            records_fetched: 0,
+            total_expected: None,
+            phase: "downloading".to_string(),
+            job_state: Some("JobComplete".to_string()),
+        },
+    );
 
     // Determine output path
     let export_path = if let Some(path) = &request.export_path {

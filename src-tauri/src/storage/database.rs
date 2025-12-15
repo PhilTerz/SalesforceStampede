@@ -701,12 +701,18 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("Failed to collect");
 
-        assert!(tables.contains(&"orgs".to_string()), "orgs table should exist");
+        assert!(
+            tables.contains(&"orgs".to_string()),
+            "orgs table should exist"
+        );
         assert!(
             tables.contains(&"job_groups".to_string()),
             "job_groups table should exist"
         );
-        assert!(tables.contains(&"jobs".to_string()), "jobs table should exist");
+        assert!(
+            tables.contains(&"jobs".to_string()),
+            "jobs table should exist"
+        );
         assert!(
             tables.contains(&"saved_queries".to_string()),
             "saved_queries table should exist"
@@ -736,7 +742,9 @@ mod tests {
     #[tokio::test]
     async fn insert_and_list_orgs() {
         let (_temp_dir, db_path) = test_db_path();
-        let db = Database::init(db_path).await.expect("Failed to init database");
+        let db = Database::init(db_path)
+            .await
+            .expect("Failed to init database");
 
         let now = current_timestamp();
 
@@ -753,7 +761,9 @@ mod tests {
             updated_at: now,
         };
 
-        db.insert_org(org.clone()).await.expect("Failed to insert org");
+        db.insert_org(org.clone())
+            .await
+            .expect("Failed to insert org");
 
         // List orgs
         let orgs = db.list_orgs().await.expect("Failed to list orgs");
@@ -771,7 +781,9 @@ mod tests {
     #[tokio::test]
     async fn insert_multiple_orgs() {
         let (_temp_dir, db_path) = test_db_path();
-        let db = Database::init(db_path).await.expect("Failed to init database");
+        let db = Database::init(db_path)
+            .await
+            .expect("Failed to init database");
 
         let now = current_timestamp();
 
@@ -836,14 +848,19 @@ mod tests {
             .await
             .expect("Should create nested directories");
 
-        assert!(db_path.exists(), "Database file should exist in nested path");
+        assert!(
+            db_path.exists(),
+            "Database file should exist in nested path"
+        );
         db.health_check().await.expect("Health check should pass");
     }
 
     #[tokio::test]
     async fn get_org_returns_none_for_missing() {
         let (_temp_dir, db_path) = test_db_path();
-        let db = Database::init(db_path).await.expect("Failed to init database");
+        let db = Database::init(db_path)
+            .await
+            .expect("Failed to init database");
 
         let result = db.get_org("nonexistent").await.expect("Should not error");
         assert!(result.is_none(), "Should return None for missing org");
@@ -852,7 +869,9 @@ mod tests {
     #[tokio::test]
     async fn get_org_returns_existing() {
         let (_temp_dir, db_path) = test_db_path();
-        let db = Database::init(db_path).await.expect("Failed to init database");
+        let db = Database::init(db_path)
+            .await
+            .expect("Failed to init database");
 
         let now = current_timestamp();
         let org = Org {
@@ -869,7 +888,10 @@ mod tests {
 
         db.insert_org(org.clone()).await.expect("Failed to insert");
 
-        let result = db.get_org("00Dxx0000000001").await.expect("Should not error");
+        let result = db
+            .get_org("00Dxx0000000001")
+            .await
+            .expect("Should not error");
         assert!(result.is_some(), "Should return the org");
         let fetched = result.unwrap();
         assert_eq!(fetched.id, org.id);
@@ -879,7 +901,9 @@ mod tests {
     #[tokio::test]
     async fn upsert_org_inserts_new() {
         let (_temp_dir, db_path) = test_db_path();
-        let db = Database::init(db_path).await.expect("Failed to init database");
+        let db = Database::init(db_path)
+            .await
+            .expect("Failed to init database");
 
         let now = current_timestamp();
         let org = Org {
@@ -904,7 +928,9 @@ mod tests {
     #[tokio::test]
     async fn upsert_org_updates_existing() {
         let (_temp_dir, db_path) = test_db_path();
-        let db = Database::init(db_path).await.expect("Failed to init database");
+        let db = Database::init(db_path)
+            .await
+            .expect("Failed to init database");
 
         let now = current_timestamp();
         let org1 = Org {
@@ -919,7 +945,9 @@ mod tests {
             updated_at: now,
         };
 
-        db.upsert_org(org1).await.expect("First upsert should succeed");
+        db.upsert_org(org1)
+            .await
+            .expect("First upsert should succeed");
 
         // Update with same ID
         let later = now + 1000;
@@ -935,7 +963,9 @@ mod tests {
             updated_at: later,
         };
 
-        db.upsert_org(org2).await.expect("Second upsert should succeed");
+        db.upsert_org(org2)
+            .await
+            .expect("Second upsert should succeed");
 
         let orgs = db.list_orgs().await.expect("Failed to list");
         assert_eq!(orgs.len(), 1, "Should still have one org");
@@ -947,7 +977,9 @@ mod tests {
     #[tokio::test]
     async fn delete_org_removes_existing() {
         let (_temp_dir, db_path) = test_db_path();
-        let db = Database::init(db_path).await.expect("Failed to init database");
+        let db = Database::init(db_path)
+            .await
+            .expect("Failed to init database");
 
         let now = current_timestamp();
         let org = Org {
@@ -969,7 +1001,9 @@ mod tests {
         assert_eq!(before.len(), 1);
 
         // Delete
-        db.delete_org("00Dxx0000000001").await.expect("Failed to delete");
+        db.delete_org("00Dxx0000000001")
+            .await
+            .expect("Failed to delete");
 
         // Verify it's gone
         let after = db.list_orgs().await.expect("Failed to list");
@@ -979,7 +1013,9 @@ mod tests {
     #[tokio::test]
     async fn delete_org_is_idempotent() {
         let (_temp_dir, db_path) = test_db_path();
-        let db = Database::init(db_path).await.expect("Failed to init database");
+        let db = Database::init(db_path)
+            .await
+            .expect("Failed to init database");
 
         // Delete non-existent org should not error
         db.delete_org("nonexistent")

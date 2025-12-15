@@ -14,7 +14,11 @@
   "license": "MIT",
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-dialog": "~2",
+    "@tauri-apps/plugin-opener": "^2",
+    "ag-grid-community": "^35.0.0",
+    "monaco-editor": "^0.55.1",
+    "vite-plugin-monaco-editor": "^1.1.0"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",

@@ -28,7 +28,8 @@ use crate::storage::credentials as keychain;
 
 /// OAuth Client ID for the Salesforce Connected App.
 /// In production, this should be loaded from configuration.
-const CLIENT_ID: &str = "3MVG9PwZx9R6_Ur.SFyEjmQZHmZd3aODqPzxLowB4KLoLmG8LTk.7n_XNfBF5cRFq5TqX3Hk62I33LIb_85V4";
+const CLIENT_ID: &str =
+    "3MVG9PwZx9R6_Ur.SFyEjmQZHmZd3aODqPzxLowB4KLoLmG8LTk.7n_XNfBF5cRFq5TqX3Hk62I33LIb_85V4";
 
 /// Ports to try for the OAuth callback server, in order of preference.
 /// Port 0 means "let the OS choose an available port".
@@ -105,7 +106,10 @@ impl PkceChallenge {
         let hash = hasher.finalize();
         let challenge = URL_SAFE_NO_PAD.encode(hash);
 
-        Self { verifier, challenge }
+        Self {
+            verifier,
+            challenge,
+        }
     }
 }
 
@@ -301,8 +305,13 @@ pub async fn start_login_flow(login_type: LoginType) -> Result<OrgCredentials, A
         wait_for_callback(listener, &state, Duration::from_secs(CALLBACK_TIMEOUT_SECS)).await?;
 
     // Step D: Exchange code for tokens
-    let token_response =
-        exchange_code(&login_type, &callback_params.code, &redirect_uri, &pkce.verifier).await?;
+    let token_response = exchange_code(
+        &login_type,
+        &callback_params.code,
+        &redirect_uri,
+        &pkce.verifier,
+    )
+    .await?;
 
     // Convert tokens to SecretString immediately
     let access_token = SecretString::from(token_response.access_token);
@@ -505,7 +514,10 @@ async fn exchange_code(
 }
 
 /// Fetches user identity information from Salesforce.
-async fn fetch_identity(id_url: &str, access_token: &SecretString) -> Result<IdentityResponse, AppError> {
+async fn fetch_identity(
+    id_url: &str,
+    access_token: &SecretString,
+) -> Result<IdentityResponse, AppError> {
     let client = reqwest::Client::new();
 
     let response = client
@@ -518,7 +530,9 @@ async fn fetch_identity(id_url: &str, access_token: &SecretString) -> Result<Ide
     if !response.status().is_success() {
         let status = response.status();
         error!("Identity request failed with status: {}", status);
-        return Err(AppError::OAuthError("Failed to verify user identity".into()));
+        return Err(AppError::OAuthError(
+            "Failed to verify user identity".into(),
+        ));
     }
 
     response
@@ -592,7 +606,10 @@ mod tests {
         assert!(pkce.verifier.len() <= 50);
 
         // Should only contain URL-safe characters
-        assert!(pkce.verifier.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        assert!(pkce
+            .verifier
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]
@@ -604,7 +621,10 @@ mod tests {
         assert!(pkce.challenge.len() <= 50);
 
         // Should only contain URL-safe characters
-        assert!(pkce.challenge.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        assert!(pkce
+            .challenge
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]
@@ -642,7 +662,9 @@ mod tests {
         assert!(state.len() <= 25);
 
         // Should only contain URL-safe characters
-        assert!(state.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        assert!(state
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]
@@ -713,7 +735,8 @@ mod tests {
 
     #[test]
     fn parse_callback_handles_oauth_error() {
-        let request = "GET /callback?error=access_denied&error_description=User+denied+access HTTP/1.1";
+        let request =
+            "GET /callback?error=access_denied&error_description=User+denied+access HTTP/1.1";
         let result = parse_callback_request(request);
 
         assert!(result.is_err());
